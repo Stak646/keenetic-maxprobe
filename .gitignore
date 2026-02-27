@@ -1,0 +1,10 @@
+# Generated archives / logs
+*.tar.gz
+*.zip
+*.log
+keenetic-maxprobe-*/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

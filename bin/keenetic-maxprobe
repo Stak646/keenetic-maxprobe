@@ -1,7 +1,6 @@
-\
 #!/bin/sh
 # keenetic-maxprobe — maximal KeeneticOS + Entware probe
-# Version: 0.6.0
+# Version: 0.6.1
 #
 # Default: FULL (may include sensitive data). Use --mode safe if needed.
 #
@@ -9,7 +8,7 @@
 
 set -u
 
-VERSION="0.6.0"
+VERSION="0.6.1"
 PROG="keenetic-maxprobe"
 
 # Prefer Entware first
@@ -484,13 +483,21 @@ wait_for_resources() {
 # ---------------- spinner / progress ----------------
 set_phase() {
   phase="$1"
+  # WORK is not initialized early (before workdir creation). Avoid writing to /meta when WORK is empty.
+  [ -n "${WORK:-}" ] || return 0
   PHASE_FILE="$WORK/meta/phase.txt"
-  printf '%s\n' "$phase" >"$PHASE_FILE" 2>/dev/null || true
+  ensure_dir "$WORK/meta" 2>/dev/null || true
+  printf '%s
+' "$phase" >"$PHASE_FILE" 2>/dev/null || true
 }
 
 set_progress() {
+  # WORK may be empty early; do nothing until workdir exists.
+  [ -n "${WORK:-}" ] || return 0
   PROGRESS_FILE="$WORK/meta/progress.txt"
-  printf '%s/%s\n' "$STEP_NO" "$TOTAL_STEPS" >"$PROGRESS_FILE" 2>/dev/null || true
+  ensure_dir "$WORK/meta" 2>/dev/null || true
+  printf '%s/%s
+' "$STEP_NO" "$TOTAL_STEPS" >"$PROGRESS_FILE" 2>/dev/null || true
 }
 
 spinner_loop() {
@@ -695,8 +702,33 @@ mirror_dir() {
   ensure_dir "$dst" || return 0
 
   say "[*] Mirror: $label ($src -> $dst)"
+  # If tar has no --exclude support AND our workdir lives under the source root, mirroring would recurse forever.
+  tar_has_exclude=0
+  tar --help 2>&1 | grep -q -- '--exclude' && tar_has_exclude=1 || true
+  if [ "$tar_has_exclude" -eq 0 ] && [ -n "${WORK:-}" ] && [ "${WORK#"$src"/}" != "$WORK" ]; then
+    warn "Skip mirror of $src: tar has no --exclude and workdir under source ($WORK) would cause self-copy recursion"
+    return 0
+  fi
   # Use tar pipe to preserve symlinks/permissions without requiring rsync
-  (cd "$src" 2>/dev/null && tar -cf - . 2>/dev/null) | (cd "$dst" 2>/dev/null && tar -xpf - 2>/dev/null) || true
+  (
+    # Build tar command with optional excludes. Main goal: avoid self-copy recursion when WORK lives under src.
+    tar_pipe_cmd() {
+      if tar --help 2>&1 | grep -q -- '--exclude'; then
+        set -- tar -cf -
+        if [ -n "${WORK:-}" ] && [ "${WORK#"$src"/}" != "$WORK" ]; then
+          rel="${WORK#$src/}"
+          set -- "$@" "--exclude=./$rel"
+        fi
+        set -- "$@" .
+        "$@" 2>/dev/null
+      else
+        tar -cf - . 2>/dev/null
+      fi
+    }
+    cd "$src" 2>/dev/null && tar_pipe_cmd
+  ) | (
+    cd "$dst" 2>/dev/null && tar -xpf - 2>/dev/null
+  ) || true
 }
 
 # ---------------- collection functions ----------------

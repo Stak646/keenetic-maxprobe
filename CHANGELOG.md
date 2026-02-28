@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0
+- Fix: устранена ошибка `can't create /meta/phase.txt` и подобные — `phase/progress` больше не пишутся до инициализации workdir.
+- Fix: устранён класс багов «бесконечное сканирование/самокопирование» (workdir/архив всегда в `/var/tmp`, а `/var/tmp` исключён из копирования/исследования).
+- Fix: стабильная генерация имён файлов (без странных `-:.tar.gz`), timestamp теперь безопасный для ФС.
+- New: Web UI (`keenetic-maxprobe --web`) — запуск в пресетах, статус, анимация, log tail, список архивов/скачивание.
+- New: метрики включают `loadavg(1m)` (плюс `metrics_current.tsv` для live UI).
+- Improve: интерактивные ответы нормализуются (убран баг повторных вопросов из-за CR/пробелов).
+- Repo: оставлен один entrypoint (`bin/keenetic-maxprobe`), installer копирует именно его.
+
 ## 0.6.0
 - Fix: CPU load indicator теперь корректный (0–100%) по `/proc/stat`, без >100% на multi-core.
 - Fix: `scan_sensitive` больше не вызывает `line ...: %s: not found` (убраны backticks в `printf`), и **не пишет значения секретов** (только путь/строка/паттерн).

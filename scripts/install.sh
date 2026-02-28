@@ -59,7 +59,7 @@ tar -xzf "$TAR" -C "$TMPDIR"
 SRC="$TMPDIR/$REPO_NAME-$BRANCH"
 
 # main executable
-cp -f "$SRC/scripts/keenetic-maxprobe" "$BIN/keenetic-maxprobe"
+cp -f "$SRC/bin/keenetic-maxprobe" "$BIN/keenetic-maxprobe"
 chmod 0755 "$BIN/keenetic-maxprobe"
 
 # helper: unified Entware service control

@@ -7,7 +7,9 @@ This document is bilingual (RU/EN).
 
 ## 1) Название архива / Archive naming
 
-Архив создаётся в выходной директории (`OUTDIR` или авто‑выбор):
+Архив создаётся в выходной директории.
+
+Начиная с **v0.7.0** вывод фиксирован в **`/var/tmp`** (а `/var/tmp` исключён из копирования/исследования), `OUTDIR` считается устаревшим и игнорируется (кроме `/var/tmp`).
 
 - `keenetic-maxprobe-<hostname>-<pid>-<UTC>.tar.gz`
 - `keenetic-maxprobe-<hostname>-<pid>-<UTC>.tar.gz.sha256`
@@ -48,7 +50,8 @@ Top-level inside the archive / Внутри архива:
 - `meta/run.log` — основной лог выполнения (шаги + команды)
 - `meta/errors.log` — ошибки/варнинги (с timestamps)
 - `meta/profile_selected.json` — выбранные профиль/режим/лимиты/архитектура
-- `meta/metrics.tsv` — CPU/RAM метрики по времени (если включено)
+- `meta/metrics.tsv` — CPU/RAM/Loadavg метрики по времени
+- `meta/metrics_current.tsv` — последняя строка метрик (для Web UI / анимации)
 - `meta/phase.txt` — последняя фаза (для анимации)
 
 Если инструмент «вроде завис» — первым делом смотрите `meta/run.log`.

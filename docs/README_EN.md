@@ -157,3 +157,33 @@ entwarectl disable <service>  # chmod -x
 - **opkg install fails**: best-effort, check `meta/errors.log`.
 - **No python3**: you'll still get raw data; do manual analysis in `fs/`, `ndm/`, `net/`.
 
+
+
+## Web UI
+
+In **v0.7.0**, a lightweight Web UI was added to run probes and view live status:
+
+- shows **phase/progress**, **CPU/RAM/loadavg**, tail of the log,
+- lists produced archives and provides download links.
+
+Start:
+
+```sh
+keenetic-maxprobe --web
+```
+
+Default bind: `127.0.0.1:8088` (local to the router).
+
+To expose in LAN (be careful: reports may contain sensitive data):
+
+```sh
+keenetic-maxprobe --web --web-bind 0.0.0.0 --web-port 8088
+```
+
+If Web UI fails because Python3 is missing:
+
+```sh
+opkg update
+opkg install python3
+```
+

@@ -42,6 +42,21 @@ keenetic-maxprobe --mode extream
 keenetic-maxprobe --mode safe
 ```
 
+
+### Web UI
+```sh
+keenetic-maxprobe --web
+```
+
+По умолчанию Web UI слушает `127.0.0.1:8088`. Чтобы открыть из LAN:
+```sh
+keenetic-maxprobe --web --web-bind 0.0.0.0 --web-port 8088
+```
+
+### Важно про вывод (v0.7.0+)
+Начиная с **v0.7.0** все файлы/архив создаются в **`/var/tmp`**, а `/var/tmp` исключён из копирования/исследования, чтобы исключить баги с самосканированием и «раздуванием» отчётов.
+
+
 ## Где смотреть результат
 См. `docs/OUTPUT_FORMAT.md`.
 

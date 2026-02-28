@@ -1,6 +1,29 @@
-# generated artifacts
-*.tar.gz
-*.sha256
+# Generated archives / outputs
+keenetic-maxprobe-*.tar.gz
+keenetic-maxprobe-*.tgz
+keenetic-maxprobe-*.zip
+keenetic-maxprobe-*.sha256
+keenetic-maxprobe-*/    # unpacked report dirs (if you extract in-repo)
+
+# Logs / temp
 *.log
 *.tmp
+.tmp/
+tmp/
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# Go
+*.exe
+*.test
+*.out
+
+# OS / editor
 .DS_Store
+.vscode/
+.idea/

@@ -1,13 +1,32 @@
-# Security / Безопасность
+# Security / Sensitive data
 
-## FULL (по умолчанию)
-- Никакой редактуры.
-- Создаётся `analysis/SENSITIVE_LOCATIONS.md` со списком точек, где встречаются секреты (без раскрытия значений).
+## Modes
 
-Рекомендуется перед отправкой:
-- скрыть секреты вручную, либо
-- зашифровать архив (например `openssl enc -aes-256-cbc`).
+### FULL (default)
+- Maximum capture.
+- May include passwords, tokens, private keys, certificates, Wi‑Fi PSK, PPPoE credentials, etc.
 
-## SAFE
-- Для части текстовых файлов делаются редактированные копии (секреты заменяются на `<redacted>`).
-- Всё равно дополнительно создаётся `analysis/SENSITIVE_LOCATIONS.md`.
+### SAFE
+- Attempts to reduce the most sensitive captures (best‑effort).
+- Still **not a guarantee**: configs may contain secrets in unexpected places.
+
+## Sensitive locations list
+
+The probe generates:
+
+- `analysis/SENSITIVE_LOCATIONS.md`
+
+It includes:
+- file paths,
+- match type (pattern),
+- line numbers (best‑effort).
+
+Use it to mask secrets before sharing archives.
+
+## Recommendation
+
+If you want to share data publicly:
+1) prefer `--mode safe`;
+2) manually review `analysis/SENSITIVE_LOCATIONS.md`;
+3) remove/mask secrets;
+4) re-pack the archive.

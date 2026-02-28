@@ -1,24 +1,22 @@
-#!/opt/bin/lua
-local out = arg[1]
-if not out then
-  io.stderr:write("usage: inventory.lua <out_file>\n")
-  os.exit(2)
+-- keenetic-maxprobe Lua collector (inventory)
+-- Version: 0.5.0
+
+local work = arg[1] or "."
+local function readfile(path, max)
+  local f = io.open(path, "r")
+  if not f then return "" end
+  local data = f:read(max or 65536) or ""
+  f:close()
+  return data
 end
-local f = assert(io.open(out, "w"))
-f:write("# lua inventory collector\n")
-f:write("# time: " .. os.date("!%Y-%m-%dT%H:%M:%SZ") .. "\n\n")
-local cmds = {
-  "lua -v 2>&1",
-  "uname -a 2>&1",
-  "id 2>&1",
-}
-for _, c in ipairs(cmds) do
-  f:write("### CMD: " .. c .. "\n")
-  local p = io.popen(c)
-  if p then
-    f:write(p:read("*a"))
-    p:close()
-  end
-  f:write("\n")
+
+print("keenetic-maxprobe Lua inventory")
+print("work=" .. work)
+print("ts_utc=" .. os.date("!%Y-%m-%dT%H:%M:%SZ"))
+print("kernel=" .. (readfile("/proc/version", 4096):gsub("%s+$","")))
+
+local mem = readfile("/proc/meminfo", 4096)
+if mem ~= "" then
+  print("\n== /proc/meminfo (head) ==")
+  io.write(mem)
 end
-f:close()

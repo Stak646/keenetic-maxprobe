@@ -1,24 +1,29 @@
 #!/bin/sh
 set -eu
 
-OUT_FILE="${1:-}"
-WORKDIR="${2:-/tmp}"
-if [ -z "$OUT_FILE" ]; then
-  echo "usage: run.sh <out_file> [workdir]" >&2
-  exit 2
+HERE="$(cd "$(dirname "$0")" && pwd)"
+WORK="${1:-.}"
+
+arch="$(uname -m 2>/dev/null || echo unknown)"
+bin=""
+
+case "$arch" in
+  aarch64|arm64) bin="$HERE/inventory_linux_arm64" ;;
+  armv7l|armv6l|arm*) bin="$HERE/inventory_linux_arm" ;;
+  mipsel*|mipsle*) bin="$HERE/inventory_linux_mipsle" ;;
+  mips*) bin="$HERE/inventory_linux_mips" ;;
+  x86_64|amd64) bin="$HERE/inventory_linux_amd64" ;;
+esac
+
+if [ -n "$bin" ] && [ -x "$bin" ]; then
+  exec "$bin" --work "$WORK"
 fi
 
-if ! command -v go >/dev/null 2>&1; then
-  echo "go not found" >"$OUT_FILE"
-  exit 0
+if command -v go >/dev/null 2>&1; then
+  cd "$HERE"
+  go build -o /tmp/kmp_go_inventory inventory.go
+  exec /tmp/kmp_go_inventory --work "$WORK"
 fi
 
-mkdir -p "$WORKDIR" 2>/dev/null || true
-BIN="$WORKDIR/kmprobe_go_inventory.$(date +%s).bin"
-SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
-go build -o "$BIN" "$SRC_DIR/inventory.go" >/dev/null 2>&1 || {
-  echo "go build failed" >"$OUT_FILE"
-  exit 0
-}
-"$BIN" "$OUT_FILE" >/dev/null 2>&1 || true
-rm -f "$BIN" 2>/dev/null || true
+echo "No prebuilt binary for arch=$arch and go not installed" >&2
+exit 1

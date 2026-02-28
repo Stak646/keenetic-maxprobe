@@ -1,19 +1,25 @@
-#!/opt/bin/ruby
-require 'time'
-out = ARGV[0] or abort("usage: inventory.rb <out_file>")
+#!/usr/bin/env ruby
+# keenetic-maxprobe Ruby collector (inventory)
+# Version: 0.5.0
 
-File.open(out, "w") do |f|
-  f.puts "# ruby inventory collector"
-  f.puts "# time: #{Time.now.getutc.iso8601 rescue Time.now}"
-  f.puts
-  cmds = [
-    "ruby -v 2>&1",
-    "uname -a 2>&1",
-    "id 2>&1",
-  ]
-  cmds.each do |c|
-    f.puts "### CMD: #{c}"
-    f.puts `#{c}`
-    f.puts
-  end
+work = ARGV[0] || "."
+puts "keenetic-maxprobe Ruby inventory"
+puts "work=#{work}"
+puts "ts_utc=#{Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")}"
+
+def readfile(path, max = 65536)
+  data = File.binread(path)
+  return data.byteslice(0, max) + "\n...<truncated>...\n" if data.bytesize > max
+  data
+rescue
+  ""
+end
+
+ver = readfile("/proc/version", 4096).strip
+puts "kernel=#{ver}" unless ver.empty?
+
+mem = readfile("/proc/meminfo", 4096)
+unless mem.empty?
+  puts "\n== /proc/meminfo =="
+  print mem
 end

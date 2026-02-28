@@ -1,23 +1,32 @@
-#!/opt/bin/perl
+#!/usr/bin/env perl
+# keenetic-maxprobe Perl collector (inventory)
+# Version: 0.5.0
 use strict;
 use warnings;
+use POSIX qw(strftime);
 
-my $out = shift @ARGV or die "usage: inventory.pl <out_file>\n";
-open(my $fh, ">", $out) or die "open($out): $!\n";
+my $work = $ARGV[0] // ".";
+print "keenetic-maxprobe Perl inventory\n";
+print "work=$work\n";
+print "ts_utc=" . strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()) . "\n";
 
-print $fh "# perl inventory collector\n";
-print $fh "# time: " . scalar(gmtime()) . " UTC\n\n";
-
-my @cmds = (
-  "perl -v 2>/dev/null | head -n 5",
-  "uname -a",
-  "id",
-  "env | sort",
-);
-
-for my $c (@cmds) {
-  print $fh "### CMD: $c\n";
-  my $outp = `$c 2>&1`;
-  print $fh $outp . "\n";
+sub slurp {
+  my ($path, $max) = @_;
+  $max //= 65536;
+  open(my $fh, "<", $path) or return "";
+  binmode($fh);
+  my $buf;
+  read($fh, $buf, $max);
+  close($fh);
+  return $buf // "";
 }
-close($fh);
+
+my $ver = slurp("/proc/version", 4096);
+$ver =~ s/\s+$//;
+print "kernel=$ver\n";
+
+my $mem = slurp("/proc/meminfo", 4096);
+if ($mem ne "") {
+  print "\n== /proc/meminfo ==\n";
+  print $mem;
+}

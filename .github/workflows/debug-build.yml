@@ -1,0 +1,56 @@
+name: Debug build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+
+      - name: Build go collectors (release)
+        working-directory: collectors/go
+        run: |
+          set -eux
+          mkdir -p dist
+          # release (small)
+          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o dist/inventory_linux_amd64 inventory.go
+          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o dist/inventory_linux_arm64 inventory.go
+          GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags='-s -w' -o dist/inventory_linux_arm inventory.go
+          GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldflags='-s -w' -o dist/inventory_linux_mipsle inventory.go
+          GOOS=linux GOARCH=mips GOMIPS=softfloat go build -trimpath -ldflags='-s -w' -o dist/inventory_linux_mips inventory.go
+
+      - name: Build go collectors (debug)
+        working-directory: collectors/go
+        run: |
+          set -eux
+          mkdir -p dist_debug
+          # debug (symbols, no stripping)
+          GOOS=linux GOARCH=amd64 go build -trimpath -o dist_debug/inventory_linux_amd64 inventory.go
+          GOOS=linux GOARCH=arm64 go build -trimpath -o dist_debug/inventory_linux_arm64 inventory.go
+          GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -o dist_debug/inventory_linux_arm inventory.go
+          GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -o dist_debug/inventory_linux_mipsle inventory.go
+          GOOS=linux GOARCH=mips GOMIPS=softfloat go build -trimpath -o dist_debug/inventory_linux_mips inventory.go
+
+      - name: Lint (basic)
+        run: |
+          set -eux
+          sh -n scripts/keenetic-maxprobe
+          sh -n scripts/install.sh
+          sh -n scripts/entwarectl
+          python3 -m py_compile collectors/py/analyze.py
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: keenetic-maxprobe-debug-build
+          path: |
+            collectors/go/dist/*
+            collectors/go/dist_debug/*

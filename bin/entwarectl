@@ -1,0 +1,61 @@
+#!/bin/sh
+# entwarectl - tiny wrapper around /opt/etc/init.d scripts
+# Works on Keenetic Entware. No configuration.
+
+PATH="/opt/bin:/opt/sbin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+INITDIR="/opt/etc/init.d"
+
+usage() {
+  echo "Usage:"
+  echo "  entwarectl list"
+  echo "  entwarectl start|stop|restart|status <Sxxname|name>"
+  echo "  entwarectl tail <glob> [n]"
+}
+
+list_svcs() {
+  [ -d "$INITDIR" ] || exit 0
+  ls -1 "$INITDIR" 2>/dev/null | grep -E '^S[0-9][0-9]' | sort
+}
+
+resolve_svc() {
+  in="$1"
+  [ -z "$in" ] && return 1
+  # exact match
+  if [ -x "$INITDIR/$in" ]; then
+    echo "$INITDIR/$in"; return 0
+  fi
+  # match by suffix (e.g. nfqws2)
+  s="$(list_svcs | grep -E "${in}$" | head -n 1)"
+  if [ -n "$s" ] && [ -x "$INITDIR/$s" ]; then
+    echo "$INITDIR/$s"; return 0
+  fi
+  return 1
+}
+
+cmd="$1"
+case "$cmd" in
+  list)
+    list_svcs
+    ;;
+  start|stop|restart|status)
+    svc="$2"
+    [ -n "$svc" ] || { usage; exit 2; }
+    path="$(resolve_svc "$svc")" || { echo "Service not found: $svc" >&2; exit 2; }
+    "$path" "$cmd"
+    ;;
+  tail)
+    pat="${2:-/opt/var/log/*}"
+    n="${3:-200}"
+    # shellcheck disable=SC2086
+    ls -1 $pat 2>/dev/null | while read -r f; do
+      echo "===== $f ====="
+      tail -n "$n" "$f" 2>/dev/null || true
+      echo
+    done
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

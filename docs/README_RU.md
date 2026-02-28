@@ -1,100 +1,91 @@
-# keenetic-maxprobe — документация (RU)
+# Документация (RU)
 
-## Что это
+## Назначение
 
-`keenetic-maxprobe` — скрипт, который **без настроек** собирает максимально подробную диагностику с KeeneticOS и Entware (OPKG) прямо на роутере:
+`keenetic-maxprobe` нужен для:
+- поиска доступных интерфейсов управления KeeneticOS (CLI `ndmc` и web/RCI);
+- инвентаризации Entware (opkg, init-скрипты, конфиги, логи);
+- поиска реальных **event hook’ов** OPKG-компонента (`/opt/etc/ndm/*.d`, `/storage/etc/ndm/*.d`);
+- формирования “карты” команд/состояний, которые лучше дергать из Telegram-бота.
 
-- системная информация Linux/ядро/память/диски/монтирования;
-- сетевое состояние (ip/маршруты/правила/соседи/порты);
-- firewall/NAT дампы (`iptables-save`, `ip6tables-save`);
-- KeeneticOS данные через `ndmc`:
-  - `show version`, `show system`, `show interface`, `show ip route`, `show ip policy`;
-  - конфиги `running-config` и `startup-config` (в **санитизированном** виде);
-  - `show log`;
-  - `components list`, `show service`, `show users`, `help`;
-- Entware/OPKG:
-  - `opkg list-installed`, `opkg status`;
-  - дерево `/opt/etc`, список init-скриптов `/opt/etc/init.d`, наличие логов `/opt/var/log`;
-- «хуки»/интеграции OPKG↔Keenetic (скрипты событий) — всё из `/opt/etc/ndm/*`;
-- проба локальных веб-эндпойнтов управления (**без логина/пароля**) на типовых портах:
-  - `/auth`, `/rci/`, `/ci/startup-config.txt`, `/ci/self-test.txt`.
+## Запуск
 
-На выходе создаётся папка с файлами и **архив `.tar.gz`**, который удобно передавать для анализа.
-
-## Важно про безопасность
-
-- Скрипт **не пытается взламывать** роутер и не делает действий, меняющих конфигурацию.
-- Скрипт **по умолчанию редактирует (redact) секреты**: пароли, ключи, токены, приватные ключи.
-- Всё равно рекомендуется **пробежать глазами** по архиву перед тем, как отправлять кому-либо.
-
-## Требования
-
-- Включён SSH/доступ к CLI.
-- Установлен OPKG/Entware (обычно это компонент KeeneticOS «OPKG»).
-- Желательно (но не обязательно): доступ в Интернет с роутера для установки зависимостей через `opkg`.
-
-## Установка и запуск
-
-### Вариант 1: One‑liner (после того как вы зальёте репозиторий на GitHub)
-
-```sh
-sh -c "$(wget -qO- https://raw.githubusercontent.com/<YOU>/<REPO>/main/scripts/install.sh)"
-```
-
-или
-
-```sh
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/<YOU>/<REPO>/main/scripts/install.sh)"
-```
-
-Инсталлятор:
-1) попробует поставить зависимости через `opkg`;
-2) установит `/opt/bin/keenetic-maxprobe`;
-3) запустит сбор и выведет путь к архиву.
-
-### Вариант 2: ручной запуск
-
-1) Скопируйте `scripts/keenetic-maxprobe.sh` на роутер, например в `/opt/bin/keenetic-maxprobe`.
-2) Сделайте исполняемым:
-
-```sh
-chmod +x /opt/bin/keenetic-maxprobe
-```
-
-3) Запустите:
+После установки Entware:
 
 ```sh
 /opt/bin/keenetic-maxprobe
 ```
 
-## Где лежит результат
+На выходе — путь к архиву `...tar.gz`. Его и присылай для анализа.
 
-Скрипт выбирает базовую директорию автоматически (приоритетно что-то из `/opt/var/tmp`, `/opt/tmp`, затем `/tmp`).
+## Формат вывода
 
-Результат:
-- Папка вида: `keenetic-maxprobe-<hostname>-<timestamp>/`
-- Архив: `keenetic-maxprobe-<hostname>-<timestamp>.tar.gz`
-- Рядом (если доступен `sha256sum`): `.sha256`
+- `ndm/` — результаты `ndmc`
+- `entware/` — opkg + entware дерево + init.d
+- `hooks/` — деревья hook’ов и дампы скриптов
+- `fs/` — списки конфигов + метаданные + дампы (<=512KiB)
+- `net/` — ip/route/rules, iptables/ipset, netstat
+- `api/` — probe web/RCI эндпойнтов (без логина)
+- `analysis/` — авто-отчёты + JSON
 
-## Как предоставить лог для дальнейших действий
+## Как из этого строится Telegram-бот (архитектура)
 
-Минимально полезный набор:
-- сам архив `...tar.gz`
-- или (если архив большой) хотя бы:
-  - `SUMMARY.txt`
-  - `ndm/show_version.txt`
-  - `ndm/show_system.txt`
-  - `ndm/show_running-config.txt`
-  - `ndm/show_log.txt`
-  - `entware/opkg_list_installed.txt`
-  - `hooks/opt_etc_ndm_tree.txt`
-  - `api/http_probe.txt`
+### 1) “Единый слой” управления KeeneticOS
 
-## Типичные дальнейшие шаги (для Telegram‑бота)
+**Рекомендовано:** бот работает на роутере и вызывает `ndmc`:
+- не нужно хранить пароль администратора;
+- стабильнее, чем разбирать web интерфейс.
 
-После анализа лога обычно можно:
-- сформировать карту команд `ndmc`/CLI для нужных функций;
-- выделить «событийные хуки» в `/opt/etc/ndm/*` и использовать их для нотификаций в Telegram;
-- собрать список служб Entware и унифицировать управление ими (start/stop/restart/status);
-- определить какие веб‑эндпойнты реально активны (`/rci/`, `/auth`) и на каких портах.
+Базовые polling-команды:
+- `ndmc -c 'show system'`
+- `ndmc -c 'show interface'`
+- `ndmc -c 'show ip route'`
+- `ndmc -c 'show ip policy'`
+- `ndmc -c 'show log'` (по требованию)
+- `ndmc -c 'components list'`
+
+Команды для изменения состояния зависят от сборки — их лучше выбирать после анализа `ndm/help.txt`.
+
+### 2) Управление Entware-службами
+
+В Entware ключевая точка управления — `/opt/etc/init.d/*`.
+
+Идея единого слоя:
+- `list` → скан `S??*` в `/opt/etc/init.d`
+- `start/stop/restart <svc>` → запуск init-скрипта
+- `status <svc>` → `status` если поддерживается, иначе fallback на `ps`
+- `logs` → хвост `/opt/var/log/*` + `ndmc show log`
+
+Для удобства в репозитории есть helper `entwarectl`.
+
+### 3) Event hooks и уведомления в Telegram
+
+OPKG-компонент запускает скрипты в директориях вида `.../*.d` при событиях:
+- `wan.d`, `ifstatechanged.d`, `ifipchanged.d`, `ifip6changed.d`
+- `netfilter.d` (пересборка правил iptables)
+- `usb.d`, `time.d`, `schedule.d`, `button.d`, и т.д.
+
+**Правильная схема для уведомлений:**
+
+1) Hook-скрипты НЕ должны напрямую отправлять в Telegram (там токены/сети/таймауты).
+2) Hook-скрипт пишет событие в spool:
+   - `/opt/var/spool/keenetic-events/<ts>-<event>.json`
+3) Telegram-бот читает spool и отправляет.
+
+События, которые почти всегда нужны:
+- WAN up/down
+- смена IPv4/IPv6 адреса
+- netfilter refresh (firewall события)
+- подключение USB
+- изменения туннелей (OpkgTun и т.п.)
+
+### 4) Web/RCI API (если включено)
+
+`keenetic-maxprobe` делает probe `/auth` и `/rci/` на обнаруженных адресах/портах.
+
+Если probe показывает `403 insufficient security level`, обычно это означает:
+- нужен HTTPS (443) вместо HTTP (80), либо
+- требуется аутентификация с правильным “уровнем безопасности” сессии.
+
+Даже если RCI включён, для бота на роутере чаще проще использовать `ndmc`.
 

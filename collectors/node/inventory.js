@@ -1,26 +1,25 @@
 #!/usr/bin/env node
-// keenetic-maxprobe Node collector (inventory)
-// Version: 0.5.0
+// collectors/node/inventory.js
+// Version: 0.6.0
+// Usage: node inventory.js <workdir>
+// Prints inventory to stdout.
 
-const fs = require('fs');
+const { execSync } = require("child_process");
 
-const work = process.argv[2] || '.';
-function readFile(path, maxBytes) {
+function sh(cmd) {
   try {
-    const buf = fs.readFileSync(path);
-    if (buf.length > maxBytes) return buf.slice(0, maxBytes).toString('utf8') + '\n...<truncated>...\n';
-    return buf.toString('utf8');
-  } catch (_) {
-    return '';
+    return execSync(cmd, { stdio: ["ignore", "pipe", "ignore"], encoding: "utf8" }).trim();
+  } catch {
+    return "";
   }
 }
 
-console.log('keenetic-maxprobe Node inventory');
-console.log('work=' + work);
-console.log('ts_utc=' + new Date().toISOString().replace('.000',''));
+const workdir = process.argv[2] || ".";
+const ts = sh("date -u '+%Y-%m-%dT%H:%M:%SZ'") || "";
+const uname = sh("uname -a") || "";
 
-const ver = readFile('/proc/version', 4096).trim();
-if (ver) console.log('kernel=' + ver);
-
-const loadavg = readFile('/proc/loadavg', 256).trim();
-if (loadavg) console.log('loadavg=' + loadavg);
+console.log("node_inventory_version=0.6.0");
+console.log("workdir=" + workdir);
+if (ts) console.log("ts_utc=" + ts);
+if (uname) console.log("uname=" + uname);
+console.log("node=" + process.version);

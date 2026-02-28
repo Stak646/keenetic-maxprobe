@@ -1,29 +1,30 @@
 #!/bin/sh
+# collectors/go/run.sh
+# Version: 0.6.0
+# Usage: sh run.sh <workdir>
+# Prints inventory to stdout (builds binary if `go` is available).
+
 set -eu
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-WORK="${1:-.}"
+WORKDIR="${1:-.}"
 
-arch="$(uname -m 2>/dev/null || echo unknown)"
-bin=""
+# Prefer a temp directory with enough space
+TMP="/tmp"
+[ -d /opt/var/tmp ] && TMP="/opt/var/tmp"
+[ -d /opt/tmp ] && TMP="/opt/tmp"
 
-case "$arch" in
-  aarch64|arm64) bin="$HERE/inventory_linux_arm64" ;;
-  armv7l|armv6l|arm*) bin="$HERE/inventory_linux_arm" ;;
-  mipsel*|mipsle*) bin="$HERE/inventory_linux_mipsle" ;;
-  mips*) bin="$HERE/inventory_linux_mips" ;;
-  x86_64|amd64) bin="$HERE/inventory_linux_amd64" ;;
-esac
-
-if [ -n "$bin" ] && [ -x "$bin" ]; then
-  exec "$bin" --work "$WORK"
-fi
+SRC_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+BIN="$TMP/kmp_go_inventory.$$"
 
 if command -v go >/dev/null 2>&1; then
-  cd "$HERE"
-  go build -o /tmp/kmp_go_inventory inventory.go
-  exec /tmp/kmp_go_inventory --work "$WORK"
+  (cd "$SRC_DIR" && go build -o "$BIN" inventory.go >/dev/null 2>&1) || {
+    echo "go collector: build failed" >&2
+    exit 1
+  }
+  "$BIN" "$WORKDIR" 2>/dev/null || "$BIN" 2>/dev/null || true
+  rm -f "$BIN" 2>/dev/null || true
+  exit 0
 fi
 
-echo "No prebuilt binary for arch=$arch and go not installed" >&2
-exit 1
+echo "go collector: go toolchain not found; skipped"
+exit 0

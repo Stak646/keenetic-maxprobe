@@ -1,48 +1,43 @@
-# Git cleanup (stop tracking generated artifacts)
+# Git cleanup (remove generated artifacts)
 
-If you accidentally committed generated archives/logs/output folders, do:
+## 1) Add rules to .gitignore
+Make sure `.gitignore` includes (example):
+- `*.tar.gz`
+- `*.sha256`
+- `keenetic-maxprobe-*/`
+- `output/`, `dist/`
 
-## 1) Add ignores
-
-Edit `.gitignore` and add patterns for generated files (archives, logs, unpacked reports).
-
-## 2) Stop tracking already committed artifacts (keep files locally)
-
-Example:
-
+## 2) If files were already committed, stop tracking them
+Example for generated archives:
 ```sh
-git rm -r --cached keenetic-maxprobe-*.tar.gz *.log keenetic-maxprobe-*/
+git rm --cached -r -- '*.tar.gz' -- '*.sha256' keenetic-maxprobe-* || true
 git add .gitignore
 git commit -m "Stop tracking generated artifacts"
-git push
 ```
 
-## 3) If large files are already in history
-
-Use `git filter-repo` (recommended) or BFG.
-
-**git filter-repo example**:
-
+## 3) Commit new files that должны быть в репозитории
+Если у вас много изменений и untracked файлов:
 ```sh
-# install: https://github.com/newren/git-filter-repo
-git filter-repo --path-glob 'keenetic-maxprobe-*.tar.gz' --invert-paths
-git filter-repo --path-glob '*.log' --invert-paths
-git push --force --all
-git push --force --tags
+git add -A
+git commit -m "Update collectors, docs, and core script"
 ```
 
-> Force push will rewrite history. If someone already cloned the repo, they need to re-clone.
+## 4) Remote / push troubleshooting
+Check remotes:
+```sh
+git remote -v
+```
 
-## 4) Fix remote URL (common SSH mistake)
+Set correct origin:
+```sh
+git remote remove origin
+git remote add origin https://github.com/Stak646/keenetic-maxprobe.git
+git push -u origin main
+```
 
-SSH remote must use colon `:` after github.com:
-
+If you want SSH:
 ```sh
 git remote set-url origin git@github.com:Stak646/keenetic-maxprobe.git
+git push -u origin main
 ```
 
-HTTPS variant:
-
-```sh
-git remote set-url origin https://github.com/Stak646/keenetic-maxprobe.git
-```

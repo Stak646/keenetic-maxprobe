@@ -1,67 +1,110 @@
-# Output format
+# Output format / Формат архива
 
-The probe produces a single archive:
+This document is bilingual (RU/EN).  
+Документ двуязычный (RU/EN).
 
-`keenetic-maxprobe-<HOST>-<UTC_TIMESTAMP>.tar.gz`
+---
 
-Inside the archive there is a folder (root of the tar) with these top-level directories:
+## 1) Название архива / Archive naming
 
-## `meta/` — run metadata & debug logs
+Архив создаётся в выходной директории (`OUTDIR` или авто‑выбор):
 
-- `meta/run.log` — human-readable main log (phases, errors, what was skipped).
-- `meta/errors.log` — condensed error list (command, exit code, file path).
-- `meta/timings.tsv` — timings table: start/end/duration per step.
-- `meta/metrics.tsv` — periodic CPU/RAM snapshot during the run.
-- `meta/profile_selected.json` — detected device profile and chosen strategy.
-- `meta/opkg_installed_before.txt` / `after.txt` / `added_by_probe.txt` — dependency tracking (what was installed temporarily).
+- `keenetic-maxprobe-<hostname>-<pid>-<UTC>.tar.gz`
+- `keenetic-maxprobe-<hostname>-<pid>-<UTC>.tar.gz.sha256`
 
-## `analysis/` — generated reports
+---
 
-- `analysis/REPORT_RU.md` — main report (RU).
-- `analysis/REPORT_EN.md` — main report (EN).
-- `analysis/SENSITIVE_LOCATIONS.md` — exact locations of potential secrets to hide before sharing.
+## 2) Структура каталогов / Directory layout
 
-## `sys/` — runtime/system snapshots
+Top-level inside the archive / Внутри архива:
 
-OS/kernel/proc snapshots:
-- `sys/proc/*` — selected `/proc` files (`cpuinfo`, `meminfo`, `loadavg`, `mounts`, `net/*`, etc).
-- `sys/ps.txt`, `sys/top.txt` (if available), `sys/dmesg.txt`, `sys/df.txt`, `sys/mount.txt`, etc.
+- `meta/` — tool metadata + logs (важнейшее)
+- `analysis/` — reports + sensitive maps
+- `fs/` — filesystem mirror (configs etc.)
+- `ndm/` — `ndmc` command outputs (KeeneticOS)
+- `entware/` — Entware / OPKG inventory
+- `net/` — networking snapshots + quick probes
+- `web/` — extended web UI / HTTP surface probe (full/extream)
+- `sys/` — system snapshots (`/proc`, `ps`, `top`, `dmesg`, mounts, df)
+- `tmp/` — internal helper files (may be empty after cleanup)
 
-Collectors output:
-- `sys/collectors/<collector>.txt` — outputs of optional language collectors (python/perl/lua/ruby/node/go).
-- `sys/collectors/*.status` — why a collector was skipped.
+---
 
-## `ndm/` — KeeneticOS / ndmc / RCI snapshots
+## 3) fs/ — как читать зеркало файловой системы / how to read FS mirror
 
-- `ndm/ndmc_*.txt` — outputs of selected `ndmc -c 'show ...'` commands.
-- `ndm/rci_probe.txt` — HTTP probe results for `/rci/*` paths (status codes).
+`fs/` сохраняет ОРИГИНАЛЬНЫЕ пути.
 
-> If `ndmc` is not available, this directory may be partially empty.
+Примеры:
+- оригинальный `/etc/passwd` → `fs/etc/passwd`
+- оригинальный `/opt/etc/init.d/S80nginx` → `fs/opt/etc/init.d/S80nginx`
+- оригинальный `/storage/etc/ndm/wan.d/10-hook` → `fs/storage/etc/ndm/wan.d/10-hook`
 
-## `entware/` — Entware / OPKG / services
+Это ключевой принцип: **по пути в `fs/` всегда понятно, где файл лежал на роутере**.
 
-- `entware/opkg/*` — `opkg` diagnostics: installed packages, config, feed info, files.
-- `entware/init.d/` — listing of `/opt/etc/init.d` scripts and their metadata.
-- `entware/services.json` — normalized inventory of services (for bot integration).
+---
 
-## `net/` — network probe
+## 4) meta/ — логи и метрики / logs & metrics
 
-- `net/http_probe.txt` — HTTP status probes for common management ports/paths.
-- `net/ss.txt` / `net/netstat.txt` — sockets list (best-effort).
-- `net/ip_addr.txt`, `net/ip_route.txt` — IP addressing and routes (if `ip` exists).
+- `meta/run.log` — основной лог выполнения (шаги + команды)
+- `meta/errors.log` — ошибки/варнинги (с timestamps)
+- `meta/profile_selected.json` — выбранные профиль/режим/лимиты/архитектура
+- `meta/metrics.tsv` — CPU/RAM метрики по времени (если включено)
+- `meta/phase.txt` — последняя фаза (для анимации)
 
-## `fs/` — filesystem mirror (path-preserving)
+Если инструмент «вроде завис» — первым делом смотрите `meta/run.log`.
 
-This is the most important part for configs.
+---
 
-`fs/` mirrors selected config paths with the same absolute structure:
+## 5) analysis/ — отчёт и работа с чувствительными / report & redaction
 
-- original `/etc/...` -> `fs/etc/...`
-- original `/opt/etc/...` -> `fs/opt/etc/...`
-- original `/storage/etc/...` -> `fs/storage/etc/...`
+- `analysis/REPORT_RU.md` — основной отчёт (RU)
+- `analysis/REPORT_EN.md` — основной отчёт (EN)
+- `analysis/SENSITIVE_LOCATIONS.md` — карта мест, где могут быть секреты (без значений)
+- `analysis/REDACTION_GUIDE_RU.md` — как скрывать данные (RU)
+- `analysis/REDACTION_GUIDE_EN.md` — how to redact (EN)
 
-So you can always understand where a copied file came from.
+---
 
-## `tmp/` — temporary debug artifacts
+## 6) net/ и web/ — API endpoints / RCI / web UIs
 
-Only included if `--no-cleanup` was used (otherwise cleaned up).
+- `net/http_probe.tsv` — быстрый probe (коды ответов) по `/`, `/rci/...` и т.п.
+- `net/listen_*` — список слушающих портов (best-effort)
+- `web/` — расширенный сбор: заголовки и небольшие фрагменты ответов по найденным портам.
+
+Подсказка:
+- `200/30x` → endpoint реально отвечает
+- `401/403` → endpoint существует, но требует аутентификацию
+- `000` → нет соединения/не тот протокол/порт закрыт/привязка только к localhost
+
+---
+
+## 7) ndm/ — KeeneticOS (ndmc)
+
+Содержит результаты `ndmc -c 'show ...'`:
+- `ndmc_show_version.txt`
+- `ndmc_show_system.txt`
+- `ndmc_show_interface.txt`
+- `ndmc_show_running_config.txt` (в forensic/extream)
+- и т.п.
+
+Это база для «карты» состояний и команд для будущего Telegram‑бота.
+
+---
+
+## 8) entware/ — OPKG + init.d
+
+- `entware/opkg/*` — версия opkg, список пакетов, status
+- `entware/init.d/*` — список init скриптов
+- `entware/services.json` — нормализованный список Entware‑служб (для бота)
+
+---
+
+## 9) sys/ — системные снимки
+
+- `sys/proc/*` — ключевые файлы `/proc`
+- `sys/ps.txt`, `sys/top.txt`
+- `sys/dmesg.txt`
+- `sys/mount.txt`, `sys/df.txt`
+
+---
+

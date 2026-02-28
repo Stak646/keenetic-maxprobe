@@ -1,98 +1,72 @@
 #!/bin/sh
-# entwarectl — tiny unified control for /opt/etc/init.d services on Keenetic (Entware/OPKG)
+# entwarectl — unified control for /opt/etc/init.d services (Entware/OPKG)
+# Version: 0.6.0
 
 set -eu
 
-INITD="/opt/etc/init.d"
-
-log() { printf '%s\n' "$*" >&2; }
+BASE="/opt/etc/init.d"
 
 usage() {
-  cat >&2 <<'EOF'
-Usage:
+  cat >&2 <<'USAGE'
+usage:
   entwarectl list
+  entwarectl status <service>
   entwarectl start <service>
   entwarectl stop <service>
   entwarectl restart <service>
-  entwarectl status <service>
-  entwarectl enable <service>     # chmod +x
-  entwarectl disable <service>    # chmod -x
-  entwarectl cat <service>        # print init script
-EOF
+  entwarectl enable <service>    # chmod +x
+  entwarectl disable <service>   # chmod -x
+
+notes:
+  - service is the init script filename from /opt/etc/init.d
+  - this is a thin wrapper intended for automation (e.g. Telegram bot)
+USAGE
 }
 
-have() { command -v "$1" >/dev/null 2>&1; }
+need_base() {
+  [ -d "$BASE" ] || { echo "init.d not found: $BASE" >&2; exit 1; }
+}
 
-resolve_service() {
-  name="$1"
-
-  # direct path
-  if [ -f "$name" ]; then
-    echo "$name"
-    return 0
-  fi
-
-  # exact match in init.d
-  if [ -f "$INITD/$name" ]; then
-    echo "$INITD/$name"
-    return 0
-  fi
-
-  for f in "$INITD"/S??*"$name"* "$INITD"/*"$name"*; do
-    [ -f "$f" ] || continue
-    echo "$f"
-    return 0
-  done
-
-  return 1
+need_svc() {
+  svc="$1"
+  [ -n "$svc" ] || { usage; exit 2; }
+  script="$BASE/$svc"
+  [ -f "$script" ] || { echo "no such init script: $script" >&2; exit 1; }
 }
 
 cmd="${1:-}"
-[ -n "$cmd" ] || { usage; exit 2; }
-
-case "$cmd" in
-  -h|--help|help) usage; exit 0 ;;
-esac
+svc="${2:-}"
 
 case "$cmd" in
   list)
-    [ -d "$INITD" ] || { log "[!] $INITD not found"; exit 1; }
-    ls -1 "$INITD" 2>/dev/null || true
+    need_base
+    ls -1 "$BASE" 2>/dev/null || true
     ;;
-  start|stop|restart|status|enable|disable|cat)
-    svc="${2:-}"
-    [ -n "$svc" ] || { usage; exit 2; }
 
-    if ! path="$(resolve_service "$svc")"; then
-      log "[!] Cannot resolve service: $svc"
-      log "    Try: entwarectl list"
-      exit 1
-    fi
-
-    case "$cmd" in
-      enable)  chmod +x "$path"; log "[+] enabled: $path" ;;
-      disable) chmod -x "$path"; log "[+] disabled: $path" ;;
-      cat)     sed -n '1,240p' "$path" ;;
-      status)
-        if [ -x "$path" ]; then
-          log "[i] script: $path (executable)"
-        else
-          log "[i] script: $path (NOT executable)"
-        fi
-        if have pgrep; then
-          base="$(basename "$path")"
-          name_guess="$(echo "$base" | sed -E 's/^S[0-9]+//')"
-          pgrep -a "$name_guess" 2>/dev/null || true
-        fi
-        "$path" status 2>/dev/null || true
-        ;;
-      start|stop|restart)
-        [ -x "$path" ] || { log "[!] Script not executable: $path"; exit 1; }
-        "$path" "$cmd"
-        ;;
-    esac
+  enable)
+    need_svc "$svc"
+    chmod +x "$script" 2>/dev/null || true
+    echo "enabled: $svc"
     ;;
+
+  disable)
+    need_svc "$svc"
+    chmod -x "$script" 2>/dev/null || true
+    echo "disabled: $svc"
+    ;;
+
+  start|stop|restart|status)
+    need_svc "$svc"
+    [ -x "$script" ] || { echo "script not executable (disabled?): $script" >&2; exit 1; }
+    "$script" "$cmd"
+    ;;
+
+  ""|help|-h|--help)
+    usage
+    ;;
+
   *)
+    echo "unknown command: $cmd" >&2
     usage
     exit 2
     ;;

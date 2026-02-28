@@ -1,105 +1,159 @@
-# keenetic-maxprobe — Documentation (EN)
+# keenetic-maxprobe — documentation (EN)
 
-## What is it?
+## 1) What it is
 
-`keenetic-maxprobe` is a **maximum‑coverage** diagnostic & research tool for **KeeneticOS + Entware (OPKG)**. It helps you:
-- capture configs / hooks / services / API visibility for deep troubleshooting;
-- build a reproducible “snapshot” for backup and bug hunting;
-- prepare ground truth for a Telegram bot that controls the router and Entware apps.
+`keenetic-maxprobe` creates a **forensic-style snapshot archive** of a Keenetic router (KeeneticOS) and Entware:
+- configs (KeeneticOS / Entware),
+- real `ndm` hook directories (OPKG),
+- Entware services (`/opt/etc/init.d`),
+- networking state (IP/route/rules/listening ports),
+- RCI/HTTP endpoint probing (local + interface addresses),
+- system info (`/proc`, `ps`, `top`, `dmesg`, `mount`, `df`),
+- very detailed tool logs.
 
-Best‑effort design: if a command/binary is missing, the step is skipped but recorded in the report.
+The tool **does not modify router configuration** (read/copy only).  
+Exception: it may temporarily install packages via `opkg` (if enabled), then remove them (best-effort).
 
-## Sensitive data warning
+## 2) Modes and profiles
 
-Default mode is `FULL`, which may include:
-- passwords, tokens, private keys, certificates,
-- PPPoE credentials, Wi‑Fi PSKs, etc.
+### MODE (depth + security)
+- `full` (default): maximum data, may include sensitive information.
+- `safe`: tries to remove some high-risk files from the mirrored FS (best-effort), still generates a sensitive map.
+- `extream`: maximum depth **without limiting sensitive data** (deeper mirroring + more probes/endpoints).
 
-The tool does **not** redact automatically, but:
-- writes `analysis/SENSITIVE_LOCATIONS.md` with **exact locations** to hide before sharing;
-- `--mode safe` attempts to reduce the most sensitive captures (still not a 100% guarantee).
+> Any mode generates `analysis/SENSITIVE_LOCATIONS.md` (sensitive map).
 
-Before sending an archive:
-1) check `analysis/SENSITIVE_LOCATIONS.md`;
-2) mask secrets;
-3) optionally re-pack.
+### PROFILE (how heavy)
+- `auto` (recommended): selected automatically based on CPU/RAM/free space.
+- `forensic`: deepest snapshot (bigger & slower).
+- `diagnostic`: balanced.
+- `lite`: minimal.
 
-## Installation (one‑liner)
+## 3) Resource limits (CPU/RAM)
 
+Default best-effort limits:
+- CPU <= **85%**
+- RAM <= **95%**
+
+CPU is computed from `/proc/stat` (0–100%).  
+Parallelism is used only for independent collectors.
+
+## 4) Install
+
+### One-liner
 ```sh
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/Stak646/keenetic-maxprobe/main/scripts/install.sh)"
 ```
 
-After install:
-- binary: `/opt/bin/keenetic-maxprobe`
-- collectors: `/opt/share/keenetic-maxprobe/collectors`
+Installed paths:
+- `/opt/bin/keenetic-maxprobe`
+- `/opt/bin/entwarectl`
+- `/opt/share/keenetic-maxprobe/collectors/*`
 
-## Usage
+## 5) Run
 
-Default run:
+### Default (FULL, auto profile)
 ```sh
 keenetic-maxprobe
 ```
 
-Init wizard (writes `/opt/etc/keenetic-maxprobe.conf`):
+### Extreme run
+```sh
+keenetic-maxprobe --mode extream
+```
+
+### SAFE
+```sh
+keenetic-maxprobe --mode safe
+```
+
+### UI language
+```sh
+keenetic-maxprobe --lang ru   # default
+keenetic-maxprobe --lang en
+```
+
+### Collector parallelism
+```sh
+keenetic-maxprobe --jobs auto
+keenetic-maxprobe --jobs 2
+```
+
+### Resource limits
+```sh
+keenetic-maxprobe --max-cpu 85 --max-mem 95
+```
+
+### Init wizard (optional)
 ```sh
 keenetic-maxprobe --init
 ```
+Wizard saves `/opt/etc/keenetic-maxprobe.conf`.
 
-Examples:
+## 6) Reading the archive
+
+See `docs/OUTPUT_FORMAT.md`.
+
+Main idea: **filesystem mirror** is stored under `fs/`:
+- `/etc/...` → `fs/etc/...`
+- `/opt/etc/...` → `fs/opt/etc/...`
+- `/storage/...` → `fs/storage/...`
+
+This keeps original paths obvious, good for backup/diff/restore.
+
+## 7) Sensitive data & redaction
+
+Generated files:
+- `analysis/SENSITIVE_LOCATIONS.md` — list of files/lines where secrets may exist (without values).
+- `analysis/REDACTION_GUIDE_EN.md` — what to hide before sharing.
+
+In `full/extream`, the archive may contain:
+- VPN passwords/keys,
+- Wi-Fi PSK,
+- bot tokens,
+- credentials in service configs, etc.
+
+Before sharing:
+1) review `analysis/SENSITIVE_LOCATIONS.md`
+2) redact in `fs/...`
+3) repack or encrypt the archive.
+
+## 8) Web UIs & API
+
+The tool attempts to:
+- detect listening ports,
+- probe HTTP/HTTPS responses,
+- store headers and a small body sample,
+- infer which endpoints exist (200/401/403/404).
+
+Outputs:
+- `net/listen_*` (ports)
+- `net/http_probe.tsv` (quick RCI/HTTP probe)
+- `web/` (extended probe in full/extream)
+
+## 9) ndm hooks & Telegram notifications
+
+KeeneticOS can trigger scripts from `*/etc/ndm/*.d` (many OPKG packages add hooks in `/opt/etc/ndm/...`).
+
+Recommended Telegram notification pattern:
+1) hook writes an event to a spool file (e.g. `/opt/var/spool/kmp/events.ndjson`)
+2) an Entware daemon reads spool and sends messages (rate-limit)
+3) manage daemon via `entwarectl`.
+
+## 10) Entware service control
+
+`entwarectl` provides unified control for `/opt/etc/init.d`:
 ```sh
-keenetic-maxprobe --profile forensic --mode full
-keenetic-maxprobe --profile diagnostic --mode safe
-keenetic-maxprobe --no-cleanup
+entwarectl list
+entwarectl status <service>
+entwarectl restart <service>
+entwarectl enable <service>   # chmod +x
+entwarectl disable <service>  # chmod -x
 ```
 
-## Profiles (including auto)
+## 11) Troubleshooting
 
-- `auto` — automatically selects a profile based on CPU/RAM.
-- `diagnostic` — faster, lighter.
-- `forensic` — maximum snapshot (recommended for deep bug hunting).
+- **Low space**: use `--outdir /opt/var/tmp` or USB, enable `--clean-tmp`.
+- **opkg install fails**: best-effort, check `meta/errors.log`.
+- **No python3**: you'll still get raw data; do manual analysis in `fs/`, `ndm/`, `net/`.
 
-## Resource protection
-
-Best‑effort throttling:
-- lower priority for heavy tasks (`nice` where available),
-- adaptive backoff if estimated CPU/RAM exceed limits:
-  - CPU: ~85%
-  - RAM: ~95%
-
-If the router is already busy due to other processes, the tool will wait.
-
-## Output
-
-Archive name:
-`keenetic-maxprobe-<HOST>-<UTC_TIMESTAMP>.tar.gz`
-
-Structure is described in `docs/OUTPUT_FORMAT.md`.
-
-## Telegram notifications (recommended approach)
-
-Keenetic OPKG provides event hooks in `/opt/etc/ndm/*.d/` (WAN up/down, IP change, netfilter reload, etc.).
-Recommended:
-- hook scripts must be **fast** (avoid blocking / timeouts);
-- write events to a queue, send Telegram messages from a separate Entware daemon.
-
-The report enumerates detected hook directories and generates a proposed notification schema.
-
-References:
-- https://support.keenetic.com (OPKG component description)
-- https://help.keenetic.com (HTTP Proxy / RCI)
-
-## Entware services unified control
-
-`scripts/entwarectl` is a tiny unified control layer for Entware init scripts:
-- list services,
-- start/stop/restart/status,
-- logs (if available).
-
-## What to share for analysis
-
-Usually enough:
-- `analysis/REPORT_EN.md`
-- `analysis/SENSITIVE_LOCATIONS.md`
-- `meta/run.log`
-- `meta/errors.log`

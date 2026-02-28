@@ -1,22 +1,31 @@
--- keenetic-maxprobe Lua collector (inventory)
--- Version: 0.5.0
+-- collectors/lua/inventory.lua
+-- Version: 0.6.0
+-- Usage: lua inventory.lua <workdir>
+-- Prints inventory to stdout (caller redirects to file).
 
-local work = arg[1] or "."
-local function readfile(path, max)
-  local f = io.open(path, "r")
-  if not f then return "" end
-  local data = f:read(max or 65536) or ""
-  f:close()
-  return data
+local workdir = arg[1] or "."
+
+local function sh(cmd)
+  local p = io.popen(cmd .. " 2>/dev/null")
+  if not p then return "" end
+  local out = p:read("*a") or ""
+  p:close()
+  return out
 end
 
-print("keenetic-maxprobe Lua inventory")
-print("work=" .. work)
-print("ts_utc=" .. os.date("!%Y-%m-%dT%H:%M:%SZ"))
-print("kernel=" .. (readfile("/proc/version", 4096):gsub("%s+$","")))
-
-local mem = readfile("/proc/meminfo", 4096)
-if mem ~= "" then
-  print("\n== /proc/meminfo (head) ==")
-  io.write(mem)
+local function trim(s)
+  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
+
+local uname = trim(sh("uname -a"))
+local dateu = trim(sh("date -u '+%Y-%m-%dT%H:%M:%SZ'"))
+local mem = trim(sh("awk '/MemTotal:/ {print $2" kB"}' /proc/meminfo"))
+local cpu = trim(sh("awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo"))
+
+print("lua_inventory_version=0.6.0")
+print("workdir=" .. workdir)
+print("ts_utc=" .. dateu)
+print("uname=" .. uname)
+if cpu ~= "" then print("cpu_model=" .. trim(cpu)) end
+if mem ~= "" then print("mem_total=" .. mem) end
+print("lua=" .. (_VERSION or "lua"))

@@ -1,23 +1,16 @@
 # Changelog
 
-## v0.5.1 (2026-02-28)
+## 0.6.0
+- Fix: CPU load indicator теперь корректный (0–100%) по `/proc/stat`, без >100% на multi-core.
+- Fix: `scan_sensitive` больше не вызывает `line ...: %s: not found` (убраны backticks в `printf`), и **не пишет значения секретов** (только путь/строка/паттерн).
+- Fix: генерация отчётов через Python-анализатор работает даже если `analyze.py` не executable (проверка `-f`, а не `-x`).
+- New: режим `extream` (максимальный сбор без ограничений по чувствительной информации; SAFE по-прежнему доступен).
+- New: авто‑Debug сбор (подробный `meta/run.log`, `meta/errors.log`, `meta/metrics.tsv`), улучшенная анимация прогресса.
+- New: контроль ресурсов (best-effort throttling) — по умолчанию CPU<=85%, RAM<=95%.
+- New: многозадачность (job pool) для независимых collectors (в пределах лимитов).
+- New: исследование web‑поверхностей (слушающие порты, HTTP/HTTPS probe, попытка получить статические страницы/эндпойнты).
+- Улучшено: структура отчёта и документация (RU/EN), как читать архив и как делать редактирование перед отправкой.
 
-### Fixed
-- **Critical**: removed non‑POSIX brace expansion in `mkdir -p "$WORK"/{...}` which created a literal directory `{analysis,meta,...}` and broke report creation.
+## 0.5.1
+- (история см. в репозитории)
 
-### Added
-- Auto debug artifacts: `meta/run.log`, `meta/errors.log`, `meta/timings.tsv`, `meta/metrics.tsv`.
-- TTY progress animation (spinner + current phase + resource stats).
-- Resource throttling (target max **85% CPU** and **95% RAM**; best‑effort, adaptive backoff).
-- Device/architecture detection and strategy selection (`meta/profile_selected.json`).
-- Better HTTP/RCI probe (ports 80/443/79, `/rci/*` paths, status codes).
-
-### Changed
-- Default profile is now `auto` (selects forensic/diagnostic/lite by hardware).
-
-### Changed
-- Archive compression is now **low CPU** by default (`gzip -1`, `nice`).
-- Collectors are executed with best‑effort timeouts and resource backoff.
-
-## v0.4.x
-- Initial public versions (see repository history).

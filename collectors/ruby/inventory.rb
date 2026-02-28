@@ -1,25 +1,15 @@
 #!/usr/bin/env ruby
-# keenetic-maxprobe Ruby collector (inventory)
-# Version: 0.5.0
+# collectors/ruby/inventory.rb
+# Version: 0.6.0
+# Usage: ruby inventory.rb <workdir>
+# Prints inventory to stdout.
 
-work = ARGV[0] || "."
-puts "keenetic-maxprobe Ruby inventory"
-puts "work=#{work}"
-puts "ts_utc=#{Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")}"
+workdir = ARGV[0] || "."
+ts = `date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null`.strip
+uname = `uname -a 2>/dev/null`.strip
 
-def readfile(path, max = 65536)
-  data = File.binread(path)
-  return data.byteslice(0, max) + "\n...<truncated>...\n" if data.bytesize > max
-  data
-rescue
-  ""
-end
-
-ver = readfile("/proc/version", 4096).strip
-puts "kernel=#{ver}" unless ver.empty?
-
-mem = readfile("/proc/meminfo", 4096)
-unless mem.empty?
-  puts "\n== /proc/meminfo =="
-  print mem
-end
+puts "ruby_inventory_version=0.6.0"
+puts "workdir=#{workdir}"
+puts "ts_utc=#{ts}" unless ts.empty?
+puts "uname=#{uname}" unless uname.empty?
+puts "ruby=#{RUBY_VERSION}"

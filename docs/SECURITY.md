@@ -1,4 +1,13 @@
-# Security
+# Security / Безопасность
 
-FULL (default): no redaction, only marking in SENSITIVE_LOCATIONS.md.
-SAFE: redacts secrets in copies, still marks locations.
+## FULL (по умолчанию)
+- Никакой редактуры.
+- Создаётся `analysis/SENSITIVE_LOCATIONS.md` со списком точек, где встречаются секреты (без раскрытия значений).
+
+Рекомендуется перед отправкой:
+- скрыть секреты вручную, либо
+- зашифровать архив (например `openssl enc -aes-256-cbc`).
+
+## SAFE
+- Для части текстовых файлов делаются редактированные копии (секреты заменяются на `<redacted>`).
+- Всё равно дополнительно создаётся `analysis/SENSITIVE_LOCATIONS.md`.

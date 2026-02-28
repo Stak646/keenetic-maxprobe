@@ -3,25 +3,69 @@ set -eu
 
 PREFIX="/opt"
 BIN="$PREFIX/bin"
+SHARE="$PREFIX/share/keenetic-maxprobe"
+TMPBASE="/tmp"
 
-echo "[+] Installing dependencies (best-effort)..."
-if command -v opkg >/dev/null 2>&1; then
-  opkg update || true
-  opkg install coreutils-findutils coreutils-stat coreutils-sha256sum tar gzip curl wget ca-bundle || true
-  opkg install python3 python3-light perl lua ruby node || true
-  opkg install ip-full iptables nftables net-tools procps-ng || true
-else
-  echo "[!] opkg not found. Install Entware/OPKG first."
-fi
+REPO_OWNER="Stak646"
+REPO_NAME="keenetic-maxprobe"
+BRANCH="main"
+TARBALL_URL="https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/heads/$BRANCH.tar.gz"
 
-echo "[+] Installing keenetic-maxprobe..."
-mkdir -p "$BIN" "$PREFIX/share/keenetic-maxprobe" || true
-cp -f "$(dirname "$0")/keenetic-maxprobe" "$BIN/keenetic-maxprobe"
+log() { printf '%s\n' "$*" >&2; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+ensure_downloader() {
+  if have curl || have wget; then
+    return 0
+  fi
+  if have opkg; then
+    log "[i] No curl/wget. Trying to install a downloader via opkg (best-effort)..."
+    opkg update || true
+    opkg install curl ca-bundle || true
+    if have curl; then return 0; fi
+    opkg install wget-ssl ca-bundle || true
+    if have wget; then return 0; fi
+    opkg install wget-nossl || true
+    if have wget; then return 0; fi
+  fi
+  log "[!] No curl/wget available and cannot install them. Install Entware/OPKG first."
+  exit 1
+}
+
+download() {
+  url="$1"
+  dst="$2"
+  if have curl; then
+    curl -fsSL "$url" -o "$dst"
+    return 0
+  fi
+  wget -qO "$dst" "$url"
+}
+
+log "[+] Installing keenetic-maxprobe from $TARBALL_URL"
+ensure_downloader
+
+mkdir -p "$BIN" "$SHARE" 2>/dev/null || true
+mkdir -p "$TMPBASE" 2>/dev/null || true
+
+TMPDIR="$TMPBASE/keenetic-maxprobe-install.$$"
+trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT INT TERM
+mkdir -p "$TMPDIR"
+
+TAR="$TMPDIR/src.tar.gz"
+download "$TARBALL_URL" "$TAR"
+
+tar -xzf "$TAR" -C "$TMPDIR"
+SRC="$TMPDIR/$REPO_NAME-$BRANCH"
+
+cp -f "$SRC/scripts/keenetic-maxprobe" "$BIN/keenetic-maxprobe"
 chmod +x "$BIN/keenetic-maxprobe"
 
-cp -f "$(dirname "$0")/../collectors/analyze.py" "$PREFIX/share/keenetic-maxprobe/analyze.py" 2>/dev/null || true
-cp -f "$(dirname "$0")/entwarectl" "$BIN/entwarectl" 2>/dev/null || true
-chmod +x "$BIN/entwarectl" 2>/dev/null || true
+rm -rf "$SHARE/collectors" 2>/dev/null || true
+mkdir -p "$SHARE"
+cp -R "$SRC/collectors" "$SHARE/collectors" 2>/dev/null || true
 
-echo "[+] Installed: $BIN/keenetic-maxprobe"
-echo "[+] Run: keenetic-maxprobe --init  (or just: keenetic-maxprobe)"
+log "[+] Installed: $BIN/keenetic-maxprobe"
+log "[+] Collectors: $SHARE/collectors"
+log "[+] Run: keenetic-maxprobe --init (or just: keenetic-maxprobe)"

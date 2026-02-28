@@ -1,22 +1,26 @@
 #!/bin/sh
 set -eu
-INITD="/opt/etc/init.d"
-usage(){ echo "Usage: entwarectl {list|start|stop|restart|status|logs} [service]"; exit 2; }
-cmd="${1:-}"; svc="${2:-}"
-[ -n "$cmd" ] || usage
+BASE="/opt/etc/init.d"
+
+usage() {
+  echo "usage: entwarectl <list|start|stop|restart|status> [service]" >&2
+}
+
+cmd="${1:-}"
+svc="${2:-}"
+
 case "$cmd" in
-  list) ls -1 "$INITD" 2>/dev/null | sed 's/^S[0-9][0-9]//' ;;
+  list)
+    ls -1 "$BASE" 2>/dev/null || true
+    ;;
   start|stop|restart|status)
-    [ -n "$svc" ] || usage
-    script="$(ls -1 "$INITD" 2>/dev/null | grep -E "^[SK]?[0-9]{2}.*$svc" | head -n 1 || true)"
-    [ -n "$script" ] || { echo "Service not found: $svc"; exit 1; }
-    "$INITD/$script" "$cmd" || true
+    [ -n "$svc" ] || { usage; exit 2; }
+    script="$BASE/$svc"
+    [ -x "$script" ] || { echo "no such init script: $script" >&2; exit 1; }
+    "$script" "$cmd" || "$script" "${cmd}" || true
     ;;
-  logs)
-    [ -n "$svc" ] || usage
-    for p in /opt/var/log/"$svc"* /opt/var/log/*"$svc"*; do
-      [ -f "$p" ] && { echo "== $p =="; tail -n 200 "$p" 2>/dev/null || true; }
-    done
+  *)
+    usage
+    exit 2
     ;;
-  *) usage ;;
 esac

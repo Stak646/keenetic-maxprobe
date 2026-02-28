@@ -1,22 +1,32 @@
-# Output format
+# Формат результатов / Output format
 
-Архив `keenetic-maxprobe-<HOST>-<UTC>.tar.gz` содержит:
+## Корень архива
+`keenetic-maxprobe-<HOST>-<UTC>.tar.gz`
 
-## fs/
-Копии файлов, путь совпадает с исходным абсолютным путём.
-Пример: `fs/opt/etc/...` соответствует `/opt/etc/...`.
+Внутри:
+- `analysis/` — отчёты, индексы, чувствительные места
+- `meta/` — метаданные, версия, окружение, список установленных/удалённых пакетов
+- `ndm/` — вывод `ndmc` (если доступен)
+- `entware/` — OPKG, init.d, логи
+- `net/` — сеть, firewall
+- `sys/` — информация о системе, /proc, /sys, исполняемые файлы
+- `fs/` — **зеркало файловой системы (конфиги/управляющие файлы)**
 
-## ndm/
-Дампы `ndmc` (если доступно).
+## Важное правило путей
+Любой файл в `fs/` соответствует исходному абсолютному пути:
 
-## entware/
-OPKG (installed/status), список файлов пакетов, init.d, логи.
+`fs/<ABS_PATH_WITHOUT_LEADING_SLASH>`
 
-## net/
-Сеть/порты/маршруты/sysctl/firewall (iptables/nft), probe HTTP/HTTPS.
+Пример:
+- `fs/etc/crontab` -> `/etc/crontab`
+- `fs/opt/etc/init.d/S80lighttpd` -> `/opt/etc/init.d/S80lighttpd`
 
-## analysis/
-Отчёты RU/EN, индексы, `SENSITIVE_LOCATIONS.md`.
+## Индексы
+- `analysis/INDEX_ALL_FILES.txt` — все файлы в fs
+- `analysis/INDEX_CONFIG_FILES.txt` — конфиги и похожие файлы
+- `analysis/INDEX_INTERACTION_FILES.txt` — “точки управления”
+- `analysis/INDEX_HOOK_SCRIPTS.txt` — ndm hooks
+- `analysis/INDEX_INITD_SCRIPTS.txt` — Entware init scripts
 
-## meta/
-`files_manifest.tsv` (sha256/права/mtime/размер/путь), версии, окружение.
+## Sensitive locations
+`analysis/SENSITIVE_LOCATIONS.md` — куда смотреть, чтобы скрыть секреты перед отправкой.

@@ -1,46 +1,45 @@
 # keenetic-maxprobe
 
-Максимально «жадный» инструмент диагностики и исследования KeeneticOS + Entware (OPKG).
+Максимально «жадный» инструмент диагностики и исследования **KeeneticOS + Entware (OPKG)**.
 
-- **По умолчанию:** `FULL` (с чувствительными данными) — для локального бэкапа/восстановления.
+- **По умолчанию:** `FULL` (с чувствительными данными) — подходит для локального бэкапа/восстановления.
 - Профили:
-  - `diagnostic` — быстрый и безопасный для повседневной диагностики.
-  - `forensic` — максимально глубокий «слепок».
-- Коллекторы (best‑effort): `sh` (core), `python`, `perl`, `lua`, `ruby`, `go` (если доступно), `node` (если доступно).
+  - `diagnostic` — быстрее, меньше шума.
+  - `forensic` — максимально глубокий слепок (по умолчанию).
+- Режимы:
+  - `full` — ничего не редактирует, но генерирует `analysis/SENSITIVE_LOCATIONS.md` (где искать секреты).
+  - `safe` — дополнительно делает редактированные копии части текстовых файлов.
+- Коллекторы (best-effort): `sh` (core) + `python` + `perl` + `lua` + `ruby` + `node` + `go` (если доступно/установлено).
 
-В режиме `FULL` инструмент **не редактирует** конфиги. Вместо этого он генерирует файл
-`analysis/SENSITIVE_LOCATIONS.md`, где перечисляет **точные места** (пути/строки/типы секретов),
-чтобы пользователь мог скрыть их перед отправкой архива.
+См. документацию:
+- RU: `docs/README_RU.md`
+- EN: `docs/README_EN.md`
+- Формат архива: `docs/OUTPUT_FORMAT.md`
+- Безопасность: `docs/SECURITY.md`
+- Как удалить лишнее из Git/истории: `docs/GIT_CLEANUP.md`
 
 ## Быстрый старт (на роутере)
 
 ### Установка (one-liner)
 ```sh
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/<YOU>/<REPO>/main/scripts/install.sh)"
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/Stak646/keenetic-maxprobe/main/scripts/install.sh)"
 ```
 или
 ```sh
-sh -c "$(wget -qO- https://raw.githubusercontent.com/<YOU>/<REPO>/main/scripts/install.sh)"
+sh -c "$(wget -qO- https://raw.githubusercontent.com/Stak646/keenetic-maxprobe/main/scripts/install.sh)"
 ```
 
-### Инициализация
+### Инициализация (спросит про очистку OUTDIR и /tmp)
 ```sh
 keenetic-maxprobe --init
 ```
 
-### Запуск по умолчанию
+### Запуск (по умолчанию)
 ```sh
 keenetic-maxprobe
 ```
 
-### Максимально глубокий снимок
-```sh
-keenetic-maxprobe --profile forensic
-```
-
-### SAFE
+### SAFE (если архив нужно кому-то отправить)
 ```sh
 keenetic-maxprobe --mode safe
 ```
-
-См. `docs/OUTPUT_FORMAT.md`.

@@ -1,60 +1,46 @@
 # keenetic-maxprobe
 
-**keenetic-maxprobe** — инструмент “без настроек”, который делает максимально подробный снимок состояния **KeeneticOS + Entware**:
-- инвентаризация конфигов и структуры `/etc`, `/storage/etc`, `/opt/etc`, `/opt/var` (с ограничением размера файлов);
-- обнаружение и дамп **OPKG/ndm event hook’ов** (`/opt/etc/ndm/*.d`, `/storage/etc/ndm/*.d`);
-- сбор сетевого состояния (ip/route/rules/neigh, iptables/ipset, слушающие порты);
-- сбор данных KeeneticOS через `ndmc` (если доступен): версия, system, интерфейсы, маршруты, политики, логи, компоненты, конфиги;
-- проба **management API** эндпойнтов (`/auth`, `/rci/`, `/ci/self-test.txt`, ...) на **всех обнаруженных локальных IPv4** и популярных портах;
-- генерация **отчёта** RU/EN в `analysis/REPORT_*.md`.
+Максимально «жадный» инструмент диагностики и исследования KeeneticOS + Entware (OPKG).
 
-По умолчанию **секреты редактируются** (password/token/key/Authorization/private keys).
+- **По умолчанию:** `FULL` (с чувствительными данными) — для локального бэкапа/восстановления.
+- Профили:
+  - `diagnostic` — быстрый и безопасный для повседневной диагностики.
+  - `forensic` — максимально глубокий «слепок».
+- Коллекторы (best‑effort): `sh` (core), `python`, `perl`, `lua`, `ruby`, `go` (если доступно), `node` (если доступно).
 
-## Быстрый запуск (после публикации в GitHub)
+В режиме `FULL` инструмент **не редактирует** конфиги. Вместо этого он генерирует файл
+`analysis/SENSITIVE_LOCATIONS.md`, где перечисляет **точные места** (пути/строки/типы секретов),
+чтобы пользователь мог скрыть их перед отправкой архива.
 
+## Быстрый старт (на роутере)
+
+### Установка (one-liner)
+```sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/<YOU>/<REPO>/main/scripts/install.sh)"
+```
+или
 ```sh
 sh -c "$(wget -qO- https://raw.githubusercontent.com/<YOU>/<REPO>/main/scripts/install.sh)"
 ```
 
-или
-
+### Инициализация
 ```sh
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/<YOU>/<REPO>/main/scripts/install.sh)"
+keenetic-maxprobe --init
 ```
 
-> В `install.sh` есть placeholder `<YOU>/<REPO>` — замени на свой репозиторий, либо выставь env `KMP_RAW_BASE`.
-
-## Запуск вручную
-
+### Запуск по умолчанию
 ```sh
-chmod +x bin/keenetic-maxprobe
-./bin/keenetic-maxprobe
+keenetic-maxprobe
 ```
 
-На роутере (Entware):
+### Максимально глубокий снимок
 ```sh
-cp bin/keenetic-maxprobe /opt/bin/
-cp bin/keenetic-maxprobe-analyze /opt/bin/
-chmod +x /opt/bin/keenetic-maxprobe /opt/bin/keenetic-maxprobe-analyze
-/opt/bin/keenetic-maxprobe
+keenetic-maxprobe --profile forensic
 ```
 
-На выходе будет путь к архиву `...tar.gz`.
+### SAFE
+```sh
+keenetic-maxprobe --mode safe
+```
 
-## Где смотреть результаты
-
-- `SUMMARY.txt` — кратко
-- `analysis/REPORT_RU.md` и `analysis/REPORT_EN.md` — вывод “что дальше делать”
-- `api/http_probe.txt` — ответы по эндпойнтам (без логина)
-- `hooks/*_tree.txt` — деревья hook’ов
-- `ndm/*.txt` — вывод `ndmc`
-- `entware/*.txt` — OPKG/Entware
-
-## Security
-
-Инструмент специально не снимает «голые» токены/пароли (они маскируются).
-Если тебе нужно отключить редактирование — **не делай этого в логах, которые отправляешь третьим лицам**.
-
-## License
-
-MIT.
+См. `docs/OUTPUT_FORMAT.md`.

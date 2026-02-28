@@ -1,0 +1,255 @@
+\
+#!/bin/sh
+set -eu
+VERSION="0.3.0"
+
+MODE="full"
+PROFILE="diagnostic"
+COLLECTOR="auto"
+OUTDIR=""
+CLEAN_OLD=0
+CLEAN_TMP=0
+INIT=0
+NONINTERACTIVE=0
+CONFIG_PATH="/opt/etc/keenetic-maxprobe.conf"
+
+log(){ printf '%s\n' "$*" >&2; }
+have(){ command -v "$1" >/dev/null 2>&1; }
+
+usage(){
+  cat <<'USAGE'
+keenetic-maxprobe [options]
+  --init
+  --mode {full|safe}
+  --profile {diagnostic|forensic}
+  --collector {auto|sh|hybrid|python|perl|lua|ruby|go|node}
+  --outdir <dir>
+  --clean-old
+  --clean-tmp
+  -y
+USAGE
+}
+
+ask_yn() {
+  prompt="$1"; def="$2"
+  if [ "$NONINTERACTIVE" -eq 1 ]; then
+    [ "$def" = "y" ] && return 0 || return 1
+  fi
+  while :; do
+    printf "%s [y/n] (default %s): " "$prompt" "$def" >&2
+    read ans </dev/tty 2>/dev/null || ans=""
+    [ -z "$ans" ] && ans="$def"
+    case "$ans" in y|Y|yes) return 0 ;; n|N|no) return 1 ;; esac
+  done
+}
+
+load_config(){
+  [ -f "$CONFIG_PATH" ] || return 0
+  # shellcheck disable=SC1090
+  . "$CONFIG_PATH" || true
+  MODE="${MODE:-full}"
+  PROFILE="${PROFILE:-diagnostic}"
+  COLLECTOR="${COLLECTOR:-auto}"
+  OUTDIR="${OUTDIR:-}"
+}
+
+save_config(){
+  mkdir -p "$(dirname "$CONFIG_PATH")" 2>/dev/null || true
+  cat >"$CONFIG_PATH" <<EOF
+MODE="$MODE"
+PROFILE="$PROFILE"
+COLLECTOR="$COLLECTOR"
+OUTDIR="$OUTDIR"
+EOF
+}
+
+init_wizard(){
+  log "== init =="
+  log "Mode: 1) FULL  2) SAFE"
+  printf "Choice [1/2] (default 1): " >&2
+  read m </dev/tty 2>/dev/null || m=""
+  [ -z "$m" ] && m="1"
+  [ "$m" = "2" ] && MODE="safe" || MODE="full"
+
+  log "Profile: 1) diagnostic  2) forensic"
+  printf "Choice [1/2] (default 1): " >&2
+  read p </dev/tty 2>/dev/null || p=""
+  [ -z "$p" ] && p="1"
+  [ "$p" = "2" ] && PROFILE="forensic" || PROFILE="diagnostic"
+
+  log "Collector: 1) auto 2) sh 3) hybrid 4) python 5) perl 6) lua 7) ruby 8) go 9) node"
+  printf "Choice [1-9] (default 1): " >&2
+  read c </dev/tty 2>/dev/null || c=""
+  [ -z "$c" ] && c="1"
+  case "$c" in
+    2) COLLECTOR="sh" ;;
+    3) COLLECTOR="hybrid" ;;
+    4) COLLECTOR="python" ;;
+    5) COLLECTOR="perl" ;;
+    6) COLLECTOR="lua" ;;
+    7) COLLECTOR="ruby" ;;
+    8) COLLECTOR="go" ;;
+    9) COLLECTOR="node" ;;
+    *) COLLECTOR="auto" ;;
+  esac
+
+  printf "OUTDIR (empty for auto): " >&2
+  read o </dev/tty 2>/dev/null || o=""
+  OUTDIR="$o"
+
+  ask_yn "Clean old keenetic-maxprobe-* in OUTDIR?" "n" && CLEAN_OLD=1 || true
+  ask_yn "Clean /tmp before run? (dangerous)" "n" && CLEAN_TMP=1 || true
+
+  save_config
+  log "Saved: $CONFIG_PATH"
+}
+
+# args
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --init) INIT=1 ;;
+    --mode) MODE="$2"; shift ;;
+    --profile) PROFILE="$2"; shift ;;
+    --collector) COLLECTOR="$2"; shift ;;
+    --outdir) OUTDIR="$2"; shift ;;
+    --clean-old) CLEAN_OLD=1 ;;
+    --clean-tmp) CLEAN_TMP=1 ;;
+    -y) NONINTERACTIVE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) log "Unknown arg: $1"; usage; exit 2 ;;
+  esac
+  shift
+done
+
+load_config
+[ "$INIT" -eq 1 ] && init_wizard
+
+case "$MODE" in full|safe) ;; *) log "Bad mode"; exit 2;; esac
+case "$PROFILE" in diagnostic|forensic) ;; *) log "Bad profile"; exit 2;; esac
+
+# outdir auto
+if [ -z "${OUTDIR:-}" ]; then
+  for d in /opt/var/tmp /opt/tmp /tmp; do
+    [ -d "$d" ] && [ -w "$d" ] && OUTDIR="$d" && break
+  done
+fi
+[ -n "$OUTDIR" ] || OUTDIR="/tmp"
+
+HOST="$(hostname 2>/dev/null || echo unknown)"
+TS="$(date -u +%Y-%m-%dT%H-%M-%SZ 2>/dev/null || date)"
+WORK="$OUTDIR/keenetic-maxprobe-$HOST-$TS"
+ARCHIVE="$OUTDIR/keenetic-maxprobe-$HOST-$TS.tar.gz"
+
+cleanup(){ [ -d "$WORK" ] && rm -rf "$WORK" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+mkdir -p "$WORK"/{fs,ndm,entware,net,analysis,meta,tmp}
+
+if [ "$CLEAN_OLD" -eq 1 ]; then
+  rm -rf "$OUTDIR"/keenetic-maxprobe-"$HOST"-* 2>/dev/null || true
+fi
+if [ "$CLEAN_TMP" -eq 1 ]; then
+  find /tmp -mindepth 1 -maxdepth 1 2>/dev/null | while read -r p; do rm -rf "$p" 2>/dev/null || true; done
+fi
+
+run_cmd(){
+  out="$1"; shift
+  {
+    echo "### CMD: $*"
+    echo "### DATE_UTC: $(date -u 2>/dev/null || true)"
+    echo
+    if have timeout; then timeout 20s "$@" || true; else "$@" || true; fi
+  } >"$out" 2>&1
+}
+
+copy_path(){
+  src="$1"; dest="$WORK/fs$src"
+  [ -e "$src" ] || return 0
+  mkdir -p "$(dirname "$dest")" 2>/dev/null || true
+  cp -a "$src" "$dest" 2>/dev/null || cp -R "$src" "$dest" 2>/dev/null || true
+}
+
+# meta
+run_cmd "$WORK/meta/versions.txt" sh -c 'uname -a; echo; busybox 2>/dev/null | head -n 5; echo; ndmc -c "show version" 2>/dev/null || true; echo; opkg --version 2>/dev/null || true'
+run_cmd "$WORK/meta/env.txt" sh -c 'set; echo; env; echo; id; echo; umask'
+
+# ndmc
+if have ndmc; then
+  for cmd in "show version" "show system" "show interface" "show ip route" "show ip policy" "show log" "components list" "help" "show running-config"; do
+    fn="$(echo "$cmd" | tr " /" "__")"
+    run_cmd "$WORK/ndm/$fn.txt" ndmc -c "$cmd"
+  done
+  run_cmd "$WORK/ndm/more_flash_startup-config.txt" ndmc -c "more flash:startup-config" || true
+fi
+
+# scan+copy
+scan_and_copy(){
+  root="$1"; [ -d "$root" ] || return 0
+  # control dirs
+  for c in "$root/ndm" "$root/init.d" "$root/cron"* "$root/crontab" "$root/rc.local"; do
+    [ -e "$c" ] && copy_path "$c"
+  done
+  find "$root" -type f 2>/dev/null | while read -r f; do
+    case "$f" in
+      *.conf|*.cfg|*.ini|*.json|*.yaml|*.yml|*.toml|*.xml|*.sh|*.rc|*.service|*.rules|*.lua|*.py|*.pl|*.rb|*.js|*.ts|*.env|*.ovpn|*.wg|*.pem|*.crt|*.key|*.pub|*.list|*.txt)
+        sz="$(wc -c <"$f" 2>/dev/null || echo 0)"
+        cap=2097152
+        [ "$PROFILE" = "forensic" ] && cap=10485760
+        if [ "$sz" -le "$cap" ]; then
+          copy_path "$f"
+        fi
+      ;;
+    esac
+  done
+}
+
+scan_and_copy /etc
+scan_and_copy /opt/etc
+scan_and_copy /storage/etc
+
+# entware
+if have opkg; then
+  run_cmd "$WORK/entware/opkg_list_installed.txt" opkg list-installed
+  run_cmd "$WORK/entware/opkg_status.txt" opkg status
+  run_cmd "$WORK/entware/opkg_files_all.txt" sh -c 'opkg list-installed | awk "{print $1}" | while read p; do echo "## $p"; opkg files "$p" 2>/dev/null || true; echo; done'
+fi
+[ -d /opt/var/log ] && copy_path /opt/var/log
+
+# net
+run_cmd "$WORK/net/ip_addr.txt" sh -c 'ip -4 addr 2>/dev/null || ifconfig 2>/dev/null || true'
+run_cmd "$WORK/net/ip_route.txt" sh -c 'ip route 2>/dev/null || route -n 2>/dev/null || true'
+run_cmd "$WORK/net/listen_ports.txt" sh -c 'ss -lntup 2>/dev/null || netstat -lntup 2>/dev/null || netstat -lntp 2>/dev/null || true'
+run_cmd "$WORK/net/sysctl_all.txt" sh -c 'sysctl -a 2>/dev/null | head -n 50000 || true'
+run_cmd "$WORK/net/iptables_save.txt" sh -c 'iptables-save 2>/dev/null || true'
+run_cmd "$WORK/net/nft_list_ruleset.txt" sh -c 'nft list ruleset 2>/dev/null || true'
+
+if [ "$PROFILE" = "forensic" ]; then
+  mkdir -p "$WORK/net/proc" 2>/dev/null || true
+  for f in /proc/cpuinfo /proc/meminfo /proc/uptime /proc/net/dev /proc/net/tcp /proc/net/udp /proc/net/unix; do
+    [ -e "$f" ] && { mkdir -p "$(dirname "$WORK/net/proc$f")" 2>/dev/null || true; cat "$f" >"$WORK/net/proc$f" 2>/dev/null || true; }
+  done
+fi
+
+# indexes
+run_cmd "$WORK/analysis/INDEX_ALL_FILES.txt" sh -c "cd '$WORK' && find fs -type f -o -type l 2>/dev/null | sort"
+run_cmd "$WORK/analysis/INDEX_HOOK_SCRIPTS.txt" sh -c "cd '$WORK' && find fs -path 'fs/*/ndm/*' -type f 2>/dev/null | sort"
+run_cmd "$WORK/analysis/INDEX_INITD_SCRIPTS.txt" sh -c "cd '$WORK' && find fs -path 'fs/opt/etc/init.d/*' -type f 2>/dev/null | sort"
+run_cmd "$WORK/analysis/INDEX_INTERACTION_FILES.txt" sh -c "cd '$WORK' && { find fs -path 'fs/*/ndm/*' -type f; find fs -path 'fs/opt/etc/init.d/*' -type f; find fs -path 'fs/etc/crontab' -type f; find fs -path 'fs/opt/etc/cron*' -type f; } 2>/dev/null | sort"
+
+# analyze + redact/mark
+if have python3; then
+  cp -f "/opt/share/keenetic-maxprobe/analyze.py" "$WORK/tmp/analyze.py" 2>/dev/null || cp -f "$(dirname "$0")/../collectors/analyze.py" "$WORK/tmp/analyze.py" 2>/dev/null || true
+  python3 "$WORK/tmp/analyze.py" "$WORK" "$MODE" "$PROFILE" >/dev/null 2>&1 || true
+else
+  echo "# Python3 not available" >"$WORK/analysis/REPORT_RU.md"
+  echo "# Python3 not available" >"$WORK/analysis/SENSITIVE_LOCATIONS.md"
+fi
+
+# pack
+( cd "$WORK" && tar -czf "$ARCHIVE" . ) 2>/dev/null || tar -czf "$ARCHIVE" -C "$WORK" . 2>/dev/null
+
+log "Created: $ARCHIVE"
+# cleanup happens by trap; we want to keep archive, so disable trap and remove only workdir:
+trap - EXIT INT TERM
+rm -rf "$WORK" 2>/dev/null || true
+exit 0

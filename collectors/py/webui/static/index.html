@@ -1,85 +1,88 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Keenetic MaxProbe — Web UI</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <header>
-    <div class="title">
+  <header class="top">
+    <div class="brand">
       <div class="logo">🛰️</div>
       <div>
-        <h1>Keenetic MaxProbe</h1>
-        <div class="subtitle">Web UI — запуск сборов, статус, лог, архивы</div>
+        <div class="title">Keenetic MaxProbe</div>
+        <div class="subtitle">Web UI • запуск, статус, логи, архивы</div>
       </div>
     </div>
-    <div class="right">
-      <span class="dot idle" id="aliveDot" title="probe status"></span>
-      <span class="pill" id="serverTime">—</span>
+    <div class="lang">
+      <label>Язык:</label>
+      <select id="langSelect">
+        <option value="ru" selected>RU</option>
+        <option value="en">EN</option>
+      </select>
     </div>
   </header>
 
-  <main>
-    <section class="panel">
-      <h2>Запуск</h2>
-      <div class="buttons">
-        <button class="btn" data-preset="lite">Lite (safe, sh)</button>
-        <button class="btn" data-preset="diagnostic">Diagnostic (safe)</button>
-        <button class="btn" data-preset="forensic">Forensic (full)</button>
-        <button class="btn danger" data-preset="extream">EXTREAM (max)</button>
-        <button class="btn secondary" id="stopBtn">Stop</button>
+  <main class="grid">
+    <section class="card">
+      <h2>Управление запуском</h2>
+      <div class="btnrow">
+        <button class="btn" data-preset="lite">Lite</button>
+        <button class="btn" data-preset="diagnostic">Diagnostic</button>
+        <button class="btn primary" data-preset="forensic">Forensic</button>
+        <button class="btn danger" data-preset="extream">Extream</button>
+      </div>
+      <div class="btnrow">
+        <button class="btn" data-preset="full">Mode: full</button>
+        <button class="btn" data-preset="safe">Mode: safe</button>
+        <button class="btn warn" id="stopBtn">Stop</button>
       </div>
       <p class="hint">
-        По умолчанию Web UI слушает <code>127.0.0.1</code>. Чтобы открыть из LAN — запускайте с <code>--web-bind 0.0.0.0</code>.
+        Если указан порт «занят», Web UI автоматически попробует следующий порт.
+        Если вы видите <code>0.0.0.0</code> — открывайте по IP роутера (например <code>http://192.168.1.1:8088/</code>).
       </p>
-      <div class="statusline" id="startMsg">—</div>
+      <div id="startResult" class="mono small"></div>
     </section>
 
-    <section class="panel">
+    <section class="card">
       <h2>Статус</h2>
-      <div class="grid">
-        <div class="card">
-          <div class="label">Phase</div>
-          <div class="value" id="phase">—</div>
-        </div>
-        <div class="card">
-          <div class="label">Progress</div>
-          <div class="value" id="progress">—</div>
-        </div>
-        <div class="card">
-          <div class="label">CPU</div>
-          <div class="value" id="cpu">—</div>
-        </div>
-        <div class="card">
-          <div class="label">RAM</div>
-          <div class="value" id="mem">—</div>
-        </div>
-        <div class="card">
-          <div class="label">Loadavg(1m)</div>
-          <div class="value" id="load1">—</div>
-        </div>
-        <div class="card">
-          <div class="label">Workdir</div>
-          <div class="value mono" id="workdir">—</div>
-        </div>
+      <div class="status">
+        <div class="k">UTC</div><div class="v mono" id="utc">—</div>
+        <div class="k">Workdir</div><div class="v mono" id="workdir">—</div>
+        <div class="k">Phase</div><div class="v mono" id="phase">—</div>
+        <div class="k">Progress</div><div class="v mono" id="progress">—</div>
+        <div class="k">CPU / RAM / Load1</div><div class="v mono" id="metrics">—</div>
+      </div>
+
+      <div class="progressbar" aria-label="progress">
+        <div class="progressfill" id="progressFill" style="width:0%"></div>
+      </div>
+
+      <div class="spinnerline">
+        <div class="spinner" id="spin"></div>
+        <div class="small mono" id="runState">—</div>
       </div>
     </section>
 
-    <section class="panel">
-      <h2>Лог (tail)</h2>
-      <pre class="log" id="log">Loading…</pre>
+    <section class="card wide">
+      <h2>Логи (tail)</h2>
+      <pre id="logBox" class="log"></pre>
     </section>
 
-    <section class="panel">
-      <h2>Архивы</h2>
-      <div id="archives">—</div>
+    <section class="card wide">
+      <h2>Архивы и рабочие папки</h2>
+      <div class="small hint">
+        Сканируются: <code>/var/tmp</code> (и <code>/tmp</code> как запасной вариант).
+      </div>
+      <div id="archives"></div>
     </section>
   </main>
 
-  <footer>
-    <div class="small">keenetic-maxprobe Web UI (local helper)</div>
+  <footer class="foot">
+    <div class="small">
+      keenetic-maxprobe Web UI • статические файлы внутри пакета • без внешних зависимостей
+    </div>
   </footer>
 
   <script src="/app.js"></script>

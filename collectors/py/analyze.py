@@ -1,573 +1,702 @@
 #!/usr/bin/env python3
-"""keenetic-maxprobe analyzer (Python)
+"""
+keenetic-maxprobe analyzer (offline)
 
-- --inventory <workdir> [--stdout]
-  Produces JSON inventory (used by bots / automation).
+Input: WORKDIR produced by bin/keenetic-maxprobe
+Output:
+  - analysis/INVENTORY.json (machine readable)
+  - analysis/REPORT_RU.md / analysis/REPORT_EN.md (human readable)
 
-- --report <workdir>
-  Generates analysis/REPORT_RU.md and analysis/REPORT_EN.md (+ INDEX files).
-
-Designed to be robust: missing files are OK.
+This analyzer is designed to be safe to run on the router itself (no external deps).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-VERSION = "0.6.0"
+VERSION = "0.7.1"
 
 
 def read_text(path: Path, limit: int = 2_000_000) -> str:
     try:
         data = path.read_bytes()
-    except Exception:
-        return ""
-    if len(data) > limit:
-        data = data[:limit]
-    try:
+        if len(data) > limit:
+            data = data[:limit] + b"\n...<truncated>...\n"
         return data.decode("utf-8", errors="replace")
     except Exception:
-        return data.decode(errors="replace")
+        return ""
 
 
-def read_json(path: Path) -> Any:
+def read_json(path: Path) -> Optional[Dict[str, Any]]:
     try:
         return json.loads(read_text(path))
     except Exception:
         return None
 
 
-def write_text(path: Path, content: str) -> None:
+def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    path.write_text(text, encoding="utf-8")
 
 
-def safe_get(d: Any, *keys: str, default: Any = "") -> Any:
-    cur = d
-    for k in keys:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return cur
+def write_json(path: Path, obj: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def parse_tsv(path: Path) -> List[List[str]]:
+def md_escape(s: str) -> str:
+    # minimal escape for Markdown tables/lists
+    return s.replace("\r", "").replace("\t", " ").replace("|", "\\|")
+
+
+def fmt_bytes(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    for unit in ["KiB", "MiB", "GiB", "TiB"]:
+        n = n / 1024.0
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+    return f"{n:.1f} PiB"
+
+
+@dataclass
+class HttpHit:
+    host: str
+    port: int
+    scheme: str
+    path: str
+    code: int
+    note: str
+    bytes: Optional[int] = None
+
+
+def parse_tsv_lines(text: str) -> List[List[str]]:
     rows: List[List[str]] = []
-    for line in read_text(path).splitlines():
-        if not line.strip() or line.startswith("#"):
+    for ln in text.splitlines():
+        if not ln.strip() or ln.lstrip().startswith("#"):
             continue
-        rows.append(line.split("\t"))
+        rows.append(ln.split("\t"))
     return rows
 
 
-def detect_hooks(fs_dir: Path) -> List[Path]:
-    """Find ndm hook directories inside fs/ mirror."""
-    hook_dirs: List[Path] = []
-    candidates = [
-        fs_dir / "etc" / "ndm",
-        fs_dir / "opt" / "etc" / "ndm",
-        fs_dir / "storage" / "etc" / "ndm",
-    ]
-    for c in candidates:
-        if c.is_dir():
-            hook_dirs.append(c)
-
-    # also look for *.d style hook folders under those trees
-    # (keep it bounded)
-    for root in candidates:
-        if not root.is_dir():
+def parse_listen_ports_tsv(path: Path) -> List[Tuple[str, str, int]]:
+    txt = read_text(path)
+    out: List[Tuple[str, str, int]] = []
+    for row in parse_tsv_lines(txt):
+        # proto ip port state source
+        if len(row) < 3:
             continue
-        count = 0
-        for p in root.rglob("*.d"):
-            if p.is_dir():
-                hook_dirs.append(p)
-                count += 1
-                if count > 200:
-                    break
-    # dedupe
+        proto, ip, port_s = row[0], row[1], row[2]
+        try:
+            port = int(port_s)
+        except Exception:
+            continue
+        out.append((proto, ip, port))
+    # unique
     seen = set()
-    out: List[Path] = []
-    for p in hook_dirs:
-        rp = str(p)
-        if rp in seen:
+    uniq: List[Tuple[str, str, int]] = []
+    for t in out:
+        if t not in seen:
+            uniq.append(t)
+            seen.add(t)
+    return uniq
+
+
+def parse_http_probe(path: Path) -> List[HttpHit]:
+    txt = read_text(path)
+    hits: List[HttpHit] = []
+    for row in parse_tsv_lines(txt):
+        # ts host port scheme path code note
+        if len(row) < 7:
             continue
-        seen.add(rp)
-        out.append(p)
-    return out
+        host = row[1]
+        try:
+            port = int(row[2])
+        except Exception:
+            continue
+        scheme = row[3]
+        pth = row[4]
+        try:
+            code = int(row[5])
+        except Exception:
+            code = 0
+        note = row[6]
+        hits.append(HttpHit(host=host, port=port, scheme=scheme, path=pth, code=code, note=note))
+    return hits
 
 
-def list_hook_scripts(hook_dir: Path, limit: int = 500) -> List[Path]:
-    scripts: List[Path] = []
-    try:
-        for p in sorted(hook_dir.iterdir()):
-            if p.is_file():
-                scripts.append(p)
-                if len(scripts) >= limit:
-                    break
-    except Exception:
-        return []
-    return scripts
+def parse_web_probe(path: Path) -> List[HttpHit]:
+    txt = read_text(path)
+    hits: List[HttpHit] = []
+    for row in parse_tsv_lines(txt):
+        # ts host port scheme path code bytes
+        if len(row) < 7:
+            continue
+        host = row[1]
+        try:
+            port = int(row[2])
+        except Exception:
+            continue
+        scheme = row[3]
+        pth = row[4]
+        try:
+            code = int(row[5])
+        except Exception:
+            code = 0
+        try:
+            b = int(row[6])
+        except Exception:
+            b = None
+        hits.append(HttpHit(host=host, port=port, scheme=scheme, path=pth, code=code, note="", bytes=b))
+    return hits
 
 
-def load_services(workdir: Path) -> List[Dict[str, Any]]:
-    j = read_json(workdir / "entware" / "services.json")
-    if isinstance(j, list):
+def detect_keeneticos_version(workdir: Path) -> str:
+    # Best-effort from ndmc_show_version.txt
+    p = workdir / "ndm" / "ndmc_show_version.txt"
+    if p.exists():
+        t = read_text(p, limit=30_000).strip()
+        # shorten
+        lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+        return " ".join(lines[:2])[:200]
+    return ""
+
+
+def read_opkg_list(workdir: Path) -> List[str]:
+    p = workdir / "entware" / "opkg_list_installed.txt"
+    txt = read_text(p, limit=3_000_000)
+    pkgs: List[str] = []
+    for ln in txt.splitlines():
+        parts = ln.split()
+        if parts:
+            pkgs.append(parts[0])
+    return sorted(set(pkgs))
+
+
+def read_services(workdir: Path) -> List[Dict[str, Any]]:
+    p = workdir / "entware" / "services.json"
+    data = read_json(p)
+    if isinstance(data, list):
         out: List[Dict[str, Any]] = []
-        for item in j:
-            if isinstance(item, dict):
-                out.append(item)
+        for it in data:
+            if isinstance(it, dict):
+                out.append(it)
         return out
     return []
 
 
-def summarize_http_probe(rows: List[List[str]], max_rows: int = 80) -> Dict[str, Any]:
-    """Return summary: endpoints that exist and per-port stats."""
-    exist: List[Dict[str, str]] = []
-    rci_ok: List[Dict[str, str]] = []
-    per_port: Dict[str, Dict[str, int]] = {}
+def list_ndm_hooks(workdir: Path) -> List[Dict[str, Any]]:
+    """
+    Scan mirrored filesystem (fs/) for /opt/etc/ndm and /storage/*/ndm and list hook-like scripts.
+    """
+    fs = workdir / "fs"
+    roots = [
+        fs / "opt" / "etc" / "ndm",
+        fs / "storage" / "etc" / "ndm",
+        fs / "etc" / "ndm",
+    ]
+    found: List[Dict[str, Any]] = []
+    for r in roots:
+        if not r.exists() or not r.is_dir():
+            continue
+        for p in sorted(r.rglob("*")):
+            if p.is_dir():
+                continue
+            rel = str(p.relative_to(fs))
+            # Focus on likely scripts
+            if p.suffix in {".sh", ".rc", ".conf"} or p.name.endswith((".d",)):
+                pass
+            # Many hooks are plain files without suffix
+            if p.stat().st_size > 0 and p.stat().st_size < 2_000_000:
+                # classify by parent dir name
+                parent = p.parent.name
+                hint = ""
+                if "hook" in rel:
+                    hint = "hook"
+                elif "event" in rel:
+                    hint = "event"
+                elif parent.endswith(".d"):
+                    hint = parent
+                found.append(
+                    {
+                        "path": rel,
+                        "size": int(p.stat().st_size),
+                        "hint": hint,
+                    }
+                )
+    return found[:2000]  # safety cap
 
-    for r in rows:
-        # ts host port scheme path code note
-        if len(r) < 7:
+
+def extract_html_title(body_text: str) -> str:
+    m = re.search(r"<title[^>]*>(.*?)</title>", body_text, flags=re.IGNORECASE | re.DOTALL)
+    if not m:
+        return ""
+    t = re.sub(r"\s+", " ", m.group(1)).strip()
+    return t[:200]
+
+
+def guess_web_titles(workdir: Path, web_hits: List[HttpHit]) -> Dict[str, str]:
+    """
+    Try to map hit -> page title from stored body samples.
+    Keys are like: "http://host:port/path".
+    """
+    titles: Dict[str, str] = {}
+    for h in web_hits:
+        if h.code in (0, 000):
             continue
-        _, host, port, scheme, path, code, note = r[:7]
-        per_port.setdefault(port, {"ok": 0, "auth": 0, "forbidden": 0, "other": 0, "no": 0})
-        if code == "000":
-            per_port[port]["no"] += 1
+        # body path: web/{host}_{port}_{scheme}/{sanitized_path}.body
+        port_dir = workdir / "web" / f"{h.host}_{h.port}_{h.scheme}"
+        if not port_dir.exists():
             continue
-        if code.startswith("2") or code.startswith("3"):
-            per_port[port]["ok"] += 1
-        elif code == "401":
-            per_port[port]["auth"] += 1
-        elif code == "403":
-            per_port[port]["forbidden"] += 1
+        sp = sanitize_path(h.path)
+        body = port_dir / f"{sp}.body"
+        if not body.exists():
+            continue
+        title = extract_html_title(read_text(body, limit=300_000))
+        if title:
+            titles[f"{h.scheme}://{h.host}:{h.port}{h.path}"] = title
+    return titles
+
+
+def sanitize_path(path: str) -> str:
+    # mirrors shell sanitize_path: "/rci/show/system" -> "rci_show_system"
+    p = path.lstrip("/")
+    p = re.sub(r"[^A-Za-z0-9._-]", "_", p)
+    return p or "root"
+
+
+def classify_api_endpoints(hits: List[HttpHit]) -> Dict[str, List[HttpHit]]:
+    """
+    Group endpoints by class (rci/ui/unknown) based on path and response codes.
+    """
+    groups: Dict[str, List[HttpHit]] = {"rci": [], "ui": [], "other": []}
+    for h in hits:
+        if h.code == 0 or h.code == 000:
+            continue
+        if h.path.startswith("/rci/"):
+            groups["rci"].append(h)
+        elif h.path in ("/", "/robots.txt") or h.path.endswith((".html", ".js", ".css")):
+            groups["ui"].append(h)
         else:
-            per_port[port]["other"] += 1
-
-        if code in {"200", "301", "302", "307", "308", "401", "403"}:
-            exist.append({"host": host, "port": port, "scheme": scheme, "path": path, "code": code, "note": note})
-            if path.startswith("/rci/") and code in {"200", "401", "403"}:
-                rci_ok.append({"host": host, "port": port, "scheme": scheme, "path": path, "code": code, "note": note})
-
-    # cap
-    exist = exist[:max_rows]
-    rci_ok = rci_ok[:max_rows]
-    return {"exists": exist, "rci_candidates": rci_ok, "per_port": per_port}
-
-
-def load_profile(workdir: Path) -> Dict[str, Any]:
-    prof = read_json(workdir / "meta" / "profile_selected.json")
-    return prof if isinstance(prof, dict) else {}
-
-
-def load_errors(workdir: Path, limit_lines: int = 200) -> List[str]:
-    p = workdir / "meta" / "errors.log"
-    if not p.exists():
-        return []
-    lines = read_text(p).splitlines()
-    return lines[-limit_lines:]
-
-
-def load_listen_ports(workdir: Path) -> List[Dict[str, str]]:
-    p = workdir / "net" / "listen_ports.tsv"
-    rows = parse_tsv(p)
-    out: List[Dict[str, str]] = []
-    for r in rows:
-        if len(r) < 5:
-            continue
-        proto, ip, port, state, src = r[:5]
-        out.append({"proto": proto, "ip": ip, "port": port, "state": state, "source": src})
-    return out
-
-
-def load_web_manifest(workdir: Path) -> List[Dict[str, str]]:
-    p = workdir / "web" / "probe.tsv"
-    rows = parse_tsv(p)
-    out: List[Dict[str, str]] = []
-    for r in rows:
-        # ts host port scheme path code bytes
-        if len(r) < 7:
-            continue
-        ts, host, port, scheme, path, code, size = r[:7]
-        out.append({"ts": ts, "host": host, "port": port, "scheme": scheme, "path": path, "code": code, "bytes": size})
-    return out
+            groups["other"].append(h)
+    return groups
 
 
 def build_inventory(workdir: Path) -> Dict[str, Any]:
-    prof = load_profile(workdir)
-    services = load_services(workdir)
-    listen = load_listen_ports(workdir)
+    meta = read_json(workdir / "meta" / "profile_selected.json") or {}
+    keen_ver = detect_keeneticos_version(workdir)
+    if keen_ver and isinstance(meta, dict):
+        meta.setdefault("keeneticos_version", keen_ver)
 
-    http_rows = parse_tsv(workdir / "net" / "http_probe.tsv")
-    http_summary = summarize_http_probe(http_rows)
+    ports = parse_listen_ports_tsv(workdir / "net" / "listen_ports.tsv") if (workdir / "net" / "listen_ports.tsv").exists() else []
+    http_hits = parse_http_probe(workdir / "net" / "http_probe.tsv") if (workdir / "net" / "http_probe.tsv").exists() else []
+    web_hits = parse_web_probe(workdir / "web" / "probe.tsv") if (workdir / "web" / "probe.tsv").exists() else []
 
-    web_manifest = load_web_manifest(workdir)
+    pkgs = read_opkg_list(workdir)
+    services = read_services(workdir)
+    hooks = list_ndm_hooks(workdir)
+    titles = guess_web_titles(workdir, web_hits)
 
     inv: Dict[str, Any] = {
         "tool": {"name": "keenetic-maxprobe", "version": VERSION},
-        "profile": prof,
-        "entware": {"services": services},
-        "network": {"listen": listen, "http_probe": http_summary},
-        "web": {"manifest": web_manifest[:200]},
-        "errors_tail": load_errors(workdir, limit_lines=200),
+        "meta": meta,
+        "keeneticos_version": keen_ver,
+        "listen_ports": [{"proto": p[0], "ip": p[1], "port": p[2]} for p in ports],
+        "http_probe": [h.__dict__ for h in http_hits],
+        "web_probe": [h.__dict__ for h in web_hits],
+        "web_titles": titles,
+        "entware": {
+            "opkg_installed_count": len(pkgs),
+            "opkg_installed": pkgs[:2000],  # cap
+            "init_services": services,
+        },
+        "ndm_hooks": hooks,
     }
     return inv
 
 
-def md_escape(s: str) -> str:
-    return s.replace("<", "&lt;").replace(">", "&gt;")
+def md_hits_table(hits: List[HttpHit], titles: Optional[Dict[str, str]] = None, limit: int = 60) -> str:
+    titles = titles or {}
+    rows = hits[:limit]
+    if not rows:
+        return "_нет данных_"
+    out = []
+    out.append("| host | port | scheme | path | code | note | title |")
+    out.append("|---|---:|---|---|---:|---|---|")
+    for h in rows:
+        key = f"{h.scheme}://{h.host}:{h.port}{h.path}"
+        title = titles.get(key, "")
+        out.append(
+            f"| {md_escape(h.host)} | {h.port} | {md_escape(h.scheme)} | `{md_escape(h.path)}` | {h.code} | {md_escape(h.note)} | {md_escape(title)} |"
+        )
+    return "\n".join(out)
 
 
-def report_ru(workdir: Path, inv: Dict[str, Any]) -> str:
-    prof = inv.get("profile", {})
-    dev = safe_get(prof, "device_model", default="") or ""
-    arch = safe_get(prof, "arch", default="?")
-    cores = safe_get(prof, "cores", default="?")
-    mem_kb = safe_get(prof, "mem_total_kb", default=0)
-    mode = safe_get(prof, "mode", default="?")
-    profile = safe_get(prof, "profile", default="?")
-    jobs = safe_get(prof, "jobs", default="?")
-    limits = safe_get(prof, "limits", default={}) or {}
-    max_cpu = limits.get("max_cpu_pct", "?")
-    max_mem = limits.get("max_mem_pct", "?")
+def md_list(items: Iterable[str], limit: int = 50) -> str:
+    out = []
+    for i, it in enumerate(items):
+        if i >= limit:
+            out.append(f"- … ({i - limit + 1} more)")
+            break
+        out.append(f"- {md_escape(it)}")
+    return "\n".join(out) if out else "_нет данных_"
 
-    mem_mb = ""
-    try:
-        mem_mb = f"{int(mem_kb) // 1024} MB"
-    except Exception:
-        mem_mb = ""
 
-    services = inv.get("entware", {}).get("services", [])
-    listen = inv.get("network", {}).get("listen", [])
-    http = inv.get("network", {}).get("http_probe", {})
-    rci = http.get("rci_candidates", []) if isinstance(http, dict) else []
-    web = inv.get("web", {}).get("manifest", [])
+def make_report_ru(inv: Dict[str, Any]) -> str:
+    meta = inv.get("meta", {}) or {}
+    keen_ver = inv.get("keeneticos_version", "") or ""
+    ports = inv.get("listen_ports", []) or []
+    http_hits = [HttpHit(**h) for h in inv.get("http_probe", []) or [] if isinstance(h, dict)]
+    web_hits = [HttpHit(**h) for h in inv.get("web_probe", []) or [] if isinstance(h, dict)]
+    titles = inv.get("web_titles", {}) or {}
+    hooks = inv.get("ndm_hooks", []) or []
+    ent = inv.get("entware", {}) or {}
+    pkgs = ent.get("opkg_installed", []) or []
+    services = ent.get("init_services", []) or []
 
-    err_tail = inv.get("errors_tail", [])
+    groups = classify_api_endpoints(http_hits)
+
+    # Determine discovered actionable endpoints: anything not 000 and note suggests auth/ok
+    discovered = [h for h in http_hits if h.code and h.code != 0 and h.code != 000]
+    discovered.sort(key=lambda x: (x.host, x.port, x.path))
+
+    # Determine web surfaces (web_probe)
+    web_ok = [h for h in web_hits if h.code and h.code != 0 and h.code != 000]
+    web_ok.sort(key=lambda x: (x.host, x.port, x.scheme, x.path))
 
     lines: List[str] = []
-    lines.append("# Отчёт keenetic-maxprobe (RU)")
+    lines.append(f"# Отчёт keenetic-maxprobe (v{VERSION})")
     lines.append("")
-    lines.append("## 1) Сводка")
+    lines.append("## Сводка")
     lines.append("")
-    lines.append(f"- Режим: **{mode}**")
-    lines.append(f"- Профиль: **{profile}**")
-    if dev:
-        lines.append(f"- Устройство: **{md_escape(dev)}**")
-    lines.append(f"- Архитектура: `{arch}`, cores={cores}, RAM~{mem_mb}")
-    lines.append(f"- Параллельность collectors: `{jobs}`")
-    lines.append(f"- Лимиты: CPU<={max_cpu}%, RAM<={max_mem}%")
+    lines.append(f"- Hostname: `{md_escape(str(meta.get('hostname','')))}'")
+    lines.append(f"- Device model: `{md_escape(str(meta.get('device_model','')))}'")
+    lines.append(f"- Arch: `{md_escape(str(meta.get('arch','')))}`, cores: `{meta.get('cores','')}`, mem_total_kb: `{meta.get('mem_total_kb','')}`")
+    if keen_ver:
+        lines.append(f"- KeeneticOS (hint): `{md_escape(keen_ver)}`")
+    lines.append(f"- Mode: `{md_escape(str(meta.get('mode','')))}`, profile: `{md_escape(str(meta.get('profile','')))}`, collectors: `{md_escape(str(meta.get('collectors','')))}`")
     lines.append("")
-    lines.append("## 2) Где смотреть главное")
+
+    lines.append("## Открытые порты (по факту)")
     lines.append("")
-    lines.append("- `meta/run.log` — основной лог выполнения")
-    lines.append("- `meta/errors.log` — ошибки/варнинги")
-    lines.append("- `analysis/SENSITIVE_LOCATIONS.md` — карта чувствительных мест")
-    lines.append("- `fs/` — зеркало конфигов (самое важное для восстановления)")
-    lines.append("- `ndm/` — `ndmc` снимки KeeneticOS")
-    lines.append("- `net/` + `web/` — порты/эндпойнты и web‑поверхности")
-    lines.append("")
-    lines.append("## 3) Слушающие порты (best‑effort)")
-    lines.append("")
-    if listen:
-        for item in listen[:60]:
-            lines.append(f"- {item.get('proto','')} {item.get('ip','')}:{item.get('port','')} ({item.get('source','')})")
-        if len(listen) > 60:
-            lines.append(f"- ... ещё {len(listen)-60}")
+    if ports:
+        # show top unique ports
+        uniq_ports = sorted({p["port"] for p in ports if isinstance(p, dict) and isinstance(p.get("port"), int)})
+        lines.append(f"Портов обнаружено: **{len(uniq_ports)}**")
+        lines.append("")
+        lines.append(md_list([str(p) for p in uniq_ports], limit=60))
     else:
-        lines.append("_Нет данных (ss/netstat не доступны, или /proc parsing не сработал)._")
+        lines.append("_нет данных_")
     lines.append("")
-    lines.append("## 4) HTTP/RCI probe — что реально отвечает")
+
+    lines.append("## Web поверхности и API эндпойнты")
     lines.append("")
-    if rci:
-        lines.append("### RCI кандидаты (существуют / требуют auth / отвечают)")
-        lines.append("")
-        for e in rci[:40]:
-            lines.append(f"- {e['host']}:{e['port']} {e['scheme']} {e['path']} → {e['code']} ({e['note']})")
-        if len(rci) > 40:
-            lines.append(f"- ... ещё {len(rci)-40}")
+    lines.append("### RCI / HTTP probe (обнаружено)")
+    lines.append("")
+    if discovered:
+        # prioritize rci hits
+        rci_hits = groups["rci"]
+        ui_hits = groups["ui"]
+        other_hits = groups["other"]
+        if rci_hits:
+            lines.append("**RCI-подобные пути:**")
+            lines.append("")
+            lines.append(md_hits_table(sorted(rci_hits, key=lambda x: (x.host, x.port, x.path)), titles=None, limit=60))
+            lines.append("")
+        if other_hits:
+            lines.append("**Прочие пути:**")
+            lines.append("")
+            lines.append(md_hits_table(sorted(other_hits, key=lambda x: (x.host, x.port, x.path)), titles=None, limit=40))
+            lines.append("")
+        if ui_hits:
+            lines.append("**UI/корень:**")
+            lines.append("")
+            lines.append(md_hits_table(sorted(ui_hits, key=lambda x: (x.host, x.port, x.path)), titles=None, limit=20))
+            lines.append("")
     else:
-        lines.append("_RCI endpoints не обнаружены по probe. Проверьте `net/http_probe.tsv` вручную._")
+        lines.append("_HTTP probe не нашёл отвечающих эндпойнтов (или curl отсутствует)._")
+        lines.append("")
+
+    lines.append("### Web probe (заголовки + sample тела)")
     lines.append("")
-    if web:
-        lines.append("### Web probe (расширенный)")
-        lines.append("")
-        # show interesting ones: 200/401/403
-        interesting = [w for w in web if w.get("code") in {"200", "301", "302", "401", "403"}]
-        for w in interesting[:60]:
-            lines.append(f"- {w.get('host')}:{w.get('port')} {w.get('scheme')} {w.get('path')} → {w.get('code')} ({w.get('bytes')} bytes)")
-        if len(interesting) > 60:
-            lines.append(f"- ... ещё {len(interesting)-60}")
-        lines.append("")
-        lines.append("Фрагменты ответов лежат в `web/<host>_<port>_<scheme>/*.headers|*.body`.")
-        lines.append("")
-    lines.append("## 5) Entware: службы и init.d")
+    if web_ok:
+        lines.append(md_hits_table(web_ok, titles=titles, limit=80))
+    else:
+        lines.append("_нет данных_")
+    lines.append("")
+
+    lines.append("## Entware: сервисы и единый слой управления")
+    lines.append("")
+    lines.append(f"- Установленных пакетов (по opkg list-installed): **{ent.get('opkg_installed_count', 0)}**")
     lines.append("")
     if services:
-        enabled = [s for s in services if s.get("executable") in (1, True, "1")]
-        disabled = [s for s in services if s.get("executable") in (0, False, "0")]
-        lines.append(f"- Всего init.d скриптов: **{len(services)}** (enabled={len(enabled)}, disabled={len(disabled)})")
+        lines.append("### Найдены init.d скрипты (/opt/etc/init.d)")
         lines.append("")
-        lines.append("Примеры (первые 30):")
-        for s in services[:30]:
-            ex = "on" if s.get("executable") in (1, True, "1") else "off"
-            lines.append(f"- `{s.get('script','')}` exec={ex} sha256={s.get('sha256','')}")
+        lines.append("| script | executable | sha256 |")
+        lines.append("|---|---:|---|")
+        for s in services[:80]:
+            lines.append(
+                f"| `{md_escape(str(s.get('script','')) )}` | {1 if s.get('executable') else 0} | `{md_escape(str(s.get('sha256','')) )}` |"
+            )
+        if len(services) > 80:
+            lines.append(f"\n_… ещё {len(services)-80} скриптов_")
         lines.append("")
-        lines.append("Управление: `entwarectl list|status|restart|enable|disable <service>`.")
+        lines.append("### Предложение: единый слой управления Entware-службами")
+        lines.append("")
+        lines.append("У большинства Entware‑служб стандартный интерфейс:")
+        lines.append("")
+        lines.append("```sh")
+        lines.append("/opt/etc/init.d/<service> start|stop|restart|status")
+        lines.append("```")
+        lines.append("")
+        lines.append("Для Telegram‑бота удобно сделать «обёртку» (например `entwarectl`) и белый список разрешённых сервисов.")
     else:
-        lines.append("_services.json не найден (возможно, нет Entware или /opt/etc/init.d отсутствует)._")
+        lines.append("_init.d скрипты не найдены (или /opt не смонтирован)._")
     lines.append("")
-    lines.append("## 6) Хуки ndm (события KeeneticOS / OPKG)")
+
+    lines.append("## NDM hooks: реальные хуки и уведомления Telegram")
     lines.append("")
-    hooks = detect_hooks(workdir / "fs")
     if hooks:
-        for d in hooks[:30]:
-            rel = str(d).replace(str(workdir) + os.sep, "")
-            lines.append(f"- `{rel}`")
-        if len(hooks) > 30:
-            lines.append(f"- ... ещё {len(hooks)-30}")
+        lines.append(f"Найдено файлов/скриптов в ndm‑директориях (cap): **{len(hooks)}**")
         lines.append("")
-        lines.append("Подсказка: эти директории важны для реализации уведомлений/автоматизаций (например, Telegram‑бот).")
+        # show top 40
+        lines.append("| path | size | hint |")
+        lines.append("|---|---:|---|")
+        for it in hooks[:40]:
+            lines.append(f"| `{md_escape(str(it.get('path','')) )}` | {it.get('size',0)} | {md_escape(str(it.get('hint','')))} |")
+        if len(hooks) > 40:
+            lines.append(f"\n_… ещё {len(hooks)-40} файлов_")
+        lines.append("")
+        lines.append("### Предложение схемы уведомлений")
+        lines.append("")
+        lines.append("1) Выбираем события (WAN up/down, VPN up/down, DHCP lease, Wi‑Fi clients, firewall blocks).")
+        lines.append("2) В соответствующих hook/event скриптах добавляем вызов «нотификатора» (shell script), который:")
+        lines.append("   - формирует короткое сообщение,")
+        lines.append("   - отправляет его в Telegram через Bot API (HTTPS).")
+        lines.append("")
+        lines.append("Мини‑шаблон уведомления (псевдо‑код):")
+        lines.append("```sh")
+        lines.append('MSG="WAN is down on $(hostname) at $(date -u)"')
+        lines.append('curl -sS -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \\')
+        lines.append('  -d "chat_id=$CHAT_ID" -d "text=$MSG" >/dev/null')
+        lines.append("```")
+        lines.append("")
+        lines.append("Важно: храните TOKEN/CHAT_ID не в hook-скриптах, а в отдельном защищённом файле (и редактируйте перед шарингом архива).")
     else:
-        lines.append("_Директории хуков не найдены в `fs/`._")
+        lines.append("_Хуки NDM не обнаружены (в зеркале fs не найден /opt/etc/ndm и аналоги)._")
     lines.append("")
-    lines.append("## 7) Чувствительные данные")
+
+    lines.append("## «Карта» команд/состояний KeeneticOS для бота")
     lines.append("")
-    lines.append("- Смотрите `analysis/SENSITIVE_LOCATIONS.md` и `analysis/REDACTION_GUIDE_RU.md`.")
-    lines.append("- В `full/extream` архив может содержать секреты. Перед отправкой — редактируйте.")
+    lines.append("### Рекомендуемый приоритет интерфейсов управления")
     lines.append("")
-    if err_tail:
-        lines.append("## 8) Ошибки/варнинги (tail)")
+    lines.append("- **ndmc**: надёжно для чтения состояния и системных команд (`show version`, `show system`, `show interface`, `show log`, `show running-config`).")
+    lines.append("- **RCI HTTP**: удобно для бота, если Web UI/RCI доступен (часто требует авторизацию).")
+    lines.append("")
+    lines.append("### Что уже можно автоматизировать (по данным архива)")
+    lines.append("")
+    if groups["rci"]:
+        # unique rci paths
+        rci_paths = sorted({h.path for h in groups["rci"]})
+        lines.append("Обнаружены RCI‑пути:")
         lines.append("")
-        lines.append("```")
-        for ln in err_tail[-80:]:
-            lines.append(ln)
-        lines.append("```")
+        lines.append(md_list([f"`{p}`" for p in rci_paths], limit=30))
         lines.append("")
-    lines.append("## 9) Что можно реализовать дальше (идеи)")
+    else:
+        lines.append("- RCI пути не подтверждены ответом (возможно закрыты/за auth/не на этих портах).")
+        lines.append("")
+
+    lines.append("Минимальный набор команд для «health check»:")
     lines.append("")
-    lines.append("- Авто‑построение карты RCI/HTTP endpoints по найденным портам (с категоризацией).")
-    lines.append("- Генерация готового skeleton OPKG‑пакета для Telegram‑daemon + hook‑скрипты.")
-    lines.append("- Авто‑валидатор конфигов и список «подозрительных» настроек (NAT/Firewall/VPN).")
+    lines.append("```sh")
+    lines.append("ndmc -c 'show version'")
+    lines.append("ndmc -c 'show system'")
+    lines.append("ndmc -c 'show interface'")
+    lines.append("ndmc -c 'show log'")
+    lines.append("```")
+    lines.append("")
+
+    lines.append("## Следующие улучшения, которые стоит добавить в maxprobe/бот")
+    lines.append("")
+    lines.append("- Сделать отдельный **inventory JSON** для бота: порты, RCI пути, init.d сервисы, hook‑скрипты.")
+    lines.append("- Добавить «проверку авторизации» для RCI (401/403) и тест Basic/Digest (только локально).")
+    lines.append("- Для web‑морды: парсить `Server`/`WWW-Authenticate` заголовки, чтобы понять стек (nginx/lighttpd/uhttpd).")
+    lines.append("- Для Entware: собрать `ps`→сопоставить процесс↔порт↔init.d скрипт.")
     lines.append("")
     return "\n".join(lines) + "\n"
 
 
-def report_en(workdir: Path, inv: Dict[str, Any]) -> str:
-    prof = inv.get("profile", {})
-    dev = safe_get(prof, "device_model", default="") or ""
-    arch = safe_get(prof, "arch", default="?")
-    cores = safe_get(prof, "cores", default="?")
-    mem_kb = safe_get(prof, "mem_total_kb", default=0)
-    mode = safe_get(prof, "mode", default="?")
-    profile = safe_get(prof, "profile", default="?")
-    jobs = safe_get(prof, "jobs", default="?")
-    limits = safe_get(prof, "limits", default={}) or {}
-    max_cpu = limits.get("max_cpu_pct", "?")
-    max_mem = limits.get("max_mem_pct", "?")
+def make_report_en(inv: Dict[str, Any]) -> str:
+    meta = inv.get("meta", {}) or {}
+    keen_ver = inv.get("keeneticos_version", "") or ""
+    ports = inv.get("listen_ports", []) or []
+    http_hits = [HttpHit(**h) for h in inv.get("http_probe", []) or [] if isinstance(h, dict)]
+    web_hits = [HttpHit(**h) for h in inv.get("web_probe", []) or [] if isinstance(h, dict)]
+    titles = inv.get("web_titles", {}) or {}
+    hooks = inv.get("ndm_hooks", []) or []
+    ent = inv.get("entware", {}) or {}
+    services = ent.get("init_services", []) or []
 
-    mem_mb = ""
-    try:
-        mem_mb = f"{int(mem_kb) // 1024} MB"
-    except Exception:
-        mem_mb = ""
-
-    services = inv.get("entware", {}).get("services", [])
-    listen = inv.get("network", {}).get("listen", [])
-    http = inv.get("network", {}).get("http_probe", {})
-    rci = http.get("rci_candidates", []) if isinstance(http, dict) else []
-    web = inv.get("web", {}).get("manifest", [])
-    err_tail = inv.get("errors_tail", [])
+    groups = classify_api_endpoints(http_hits)
+    discovered = [h for h in http_hits if h.code and h.code != 0 and h.code != 000]
+    discovered.sort(key=lambda x: (x.host, x.port, x.path))
+    web_ok = [h for h in web_hits if h.code and h.code != 0 and h.code != 000]
+    web_ok.sort(key=lambda x: (x.host, x.port, x.scheme, x.path))
 
     lines: List[str] = []
-    lines.append("# keenetic-maxprobe report (EN)")
+    lines.append(f"# keenetic-maxprobe report (v{VERSION})")
     lines.append("")
-    lines.append("## 1) Summary")
+    lines.append("## Summary")
     lines.append("")
-    lines.append(f"- Mode: **{mode}**")
-    lines.append(f"- Profile: **{profile}**")
-    if dev:
-        lines.append(f"- Device: **{md_escape(dev)}**")
-    lines.append(f"- Arch: `{arch}`, cores={cores}, RAM~{mem_mb}")
-    lines.append(f"- Collector parallel jobs: `{jobs}`")
-    lines.append(f"- Limits: CPU<={max_cpu}%, RAM<={max_mem}%")
+    lines.append(f"- Hostname: `{md_escape(str(meta.get('hostname','')))}'")
+    lines.append(f"- Device model: `{md_escape(str(meta.get('device_model','')))}'")
+    lines.append(f"- Arch: `{md_escape(str(meta.get('arch','')))}', cores: `{meta.get('cores','')}`, mem_total_kb: `{meta.get('mem_total_kb','')}`")
+    if keen_ver:
+        lines.append(f"- KeeneticOS (hint): `{md_escape(keen_ver)}`")
+    lines.append(f"- Mode: `{md_escape(str(meta.get('mode','')))}`, profile: `{md_escape(str(meta.get('profile','')))}`, collectors: `{md_escape(str(meta.get('collectors','')))}`")
     lines.append("")
-    lines.append("## 2) Where to look first")
+
+    lines.append("## Listening ports (observed)")
     lines.append("")
-    lines.append("- `meta/run.log` — main execution log")
-    lines.append("- `meta/errors.log` — errors/warnings")
-    lines.append("- `analysis/SENSITIVE_LOCATIONS.md` — sensitive map")
-    lines.append("- `fs/` — filesystem mirror (most important)")
-    lines.append("- `ndm/` — `ndmc` snapshots (KeeneticOS)")
-    lines.append("- `net/` + `web/` — ports/endpoints + web surface")
-    lines.append("")
-    lines.append("## 3) Listening ports (best-effort)")
-    lines.append("")
-    if listen:
-        for item in listen[:60]:
-            lines.append(f"- {item.get('proto','')} {item.get('ip','')}:{item.get('port','')} ({item.get('source','')})")
-        if len(listen) > 60:
-            lines.append(f"- ... +{len(listen)-60} more")
+    if ports:
+        uniq_ports = sorted({p["port"] for p in ports if isinstance(p, dict) and isinstance(p.get("port"), int)})
+        lines.append(f"Unique ports: **{len(uniq_ports)}**")
+        lines.append("")
+        lines.append(md_list([str(p) for p in uniq_ports], limit=60))
     else:
-        lines.append("_No data (ss/netstat missing, or /proc parsing failed)._")
+        lines.append("_no data_")
     lines.append("")
-    lines.append("## 4) HTTP/RCI probe — what responds")
+
+    lines.append("## Web surfaces and API endpoints")
     lines.append("")
-    if rci:
-        lines.append("### RCI candidates (exist / require auth / respond)")
-        lines.append("")
-        for e in rci[:40]:
-            lines.append(f"- {e['host']}:{e['port']} {e['scheme']} {e['path']} → {e['code']} ({e['note']})")
-        if len(rci) > 40:
-            lines.append(f"- ... +{len(rci)-40} more")
+    lines.append("### RCI / HTTP probe (discovered)")
+    lines.append("")
+    if discovered:
+        rci_hits = groups["rci"]
+        other_hits = groups["other"]
+        if rci_hits:
+            lines.append("**RCI-like paths:**")
+            lines.append("")
+            lines.append(md_hits_table(sorted(rci_hits, key=lambda x: (x.host, x.port, x.path)), titles=None, limit=60))
+            lines.append("")
+        if other_hits:
+            lines.append("**Other paths:**")
+            lines.append("")
+            lines.append(md_hits_table(sorted(other_hits, key=lambda x: (x.host, x.port, x.path)), titles=None, limit=40))
+            lines.append("")
     else:
-        lines.append("_No RCI endpoints found by probe. Check `net/http_probe.tsv` manually._")
+        lines.append("_HTTP probe found no responding endpoints (or curl is missing)._")
+        lines.append("")
+
+    lines.append("### Web probe (headers + body sample)")
     lines.append("")
-    if web:
-        lines.append("### Web probe (extended)")
-        lines.append("")
-        interesting = [w for w in web if w.get("code") in {"200", "301", "302", "401", "403"}]
-        for w in interesting[:60]:
-            lines.append(f"- {w.get('host')}:{w.get('port')} {w.get('scheme')} {w.get('path')} → {w.get('code')} ({w.get('bytes')} bytes)")
-        if len(interesting) > 60:
-            lines.append(f"- ... +{len(interesting)-60} more")
-        lines.append("")
-        lines.append("Response samples are stored in `web/<host>_<port>_<scheme>/*.headers|*.body`.")
-        lines.append("")
-    lines.append("## 5) Entware services (init.d)")
+    if web_ok:
+        lines.append(md_hits_table(web_ok, titles=titles, limit=80))
+    else:
+        lines.append("_no data_")
+    lines.append("")
+
+    lines.append("## Entware: services and unified control layer")
+    lines.append("")
+    lines.append(f"- Installed packages (opkg list-installed): **{ent.get('opkg_installed_count', 0)}**")
     lines.append("")
     if services:
-        enabled = [s for s in services if s.get("executable") in (1, True, "1")]
-        disabled = [s for s in services if s.get("executable") in (0, False, "0")]
-        lines.append(f"- Total init.d scripts: **{len(services)}** (enabled={len(enabled)}, disabled={len(disabled)})")
+        lines.append("### init.d scripts found (/opt/etc/init.d)")
         lines.append("")
-        lines.append("Examples (first 30):")
-        for s in services[:30]:
-            ex = "on" if s.get("executable") in (1, True, "1") else "off"
-            lines.append(f"- `{s.get('script','')}` exec={ex} sha256={s.get('sha256','')}")
+        lines.append("| script | executable | sha256 |")
+        lines.append("|---|---:|---|")
+        for s in services[:80]:
+            lines.append(
+                f"| `{md_escape(str(s.get('script','')) )}` | {1 if s.get('executable') else 0} | `{md_escape(str(s.get('sha256','')) )}` |"
+            )
+        if len(services) > 80:
+            lines.append(f"\n_… {len(services)-80} more scripts_")
         lines.append("")
-        lines.append("Control via: `entwarectl list|status|restart|enable|disable <service>`.")
+        lines.append("Suggested unified interface:")
+        lines.append("")
+        lines.append("```sh")
+        lines.append("/opt/etc/init.d/<service> start|stop|restart|status")
+        lines.append("```")
     else:
-        lines.append("_services.json not found (Entware missing or /opt/etc/init.d absent)._")
+        lines.append("_no init.d scripts found_")
     lines.append("")
-    lines.append("## 6) ndm hooks (KeeneticOS / OPKG events)")
+
+    lines.append("## NDM hooks and Telegram notifications")
     lines.append("")
-    hooks = detect_hooks(workdir / "fs")
     if hooks:
-        for d in hooks[:30]:
-            rel = str(d).replace(str(workdir) + os.sep, "")
-            lines.append(f"- `{rel}`")
-        if len(hooks) > 30:
-            lines.append(f"- ... +{len(hooks)-30} more")
+        lines.append(f"Files/scripts detected in NDM hook dirs (cap): **{len(hooks)}**")
         lines.append("")
-        lines.append("Hint: these directories matter for event-driven automation (e.g. Telegram notifications).")
+        lines.append("| path | size | hint |")
+        lines.append("|---|---:|---|")
+        for it in hooks[:40]:
+            lines.append(f"| `{md_escape(str(it.get('path','')) )}` | {it.get('size',0)} | {md_escape(str(it.get('hint','')))} |")
+        if len(hooks) > 40:
+            lines.append(f"\n_… {len(hooks)-40} more files_")
+        lines.append("")
+        lines.append("Telegram notification flow suggestion:")
+        lines.append("```sh")
+        lines.append('MSG="WAN is down on $(hostname) at $(date -u)"')
+        lines.append('curl -sS -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \\')
+        lines.append('  -d "chat_id=$CHAT_ID" -d "text=$MSG" >/dev/null')
+        lines.append("```")
     else:
-        lines.append("_No hook directories found in `fs/`._")
+        lines.append("_no hooks detected_")
     lines.append("")
-    lines.append("## 7) Sensitive data")
+
+    lines.append("## KeeneticOS command/state map for a bot")
     lines.append("")
-    lines.append("- See `analysis/SENSITIVE_LOCATIONS.md` and `analysis/REDACTION_GUIDE_EN.md`.")
-    lines.append("- In `full/extream` the archive may contain secrets. Redact before sharing.")
+    lines.append("- Prefer **ndmc** for state snapshots and reliable reads.")
+    lines.append("- Prefer **RCI HTTP** for bot-friendly calls when exposed (often needs auth).")
     lines.append("")
-    if err_tail:
-        lines.append("## 8) Errors/warnings (tail)")
-        lines.append("")
-        lines.append("```")
-        for ln in err_tail[-80:]:
-            lines.append(ln)
-        lines.append("```")
-        lines.append("")
-    lines.append("## 9) Next steps / ideas")
-    lines.append("")
-    lines.append("- Auto-map RCI/HTTP endpoints per port (categorized).")
-    lines.append("- Generate an OPKG package skeleton for a Telegram daemon + hook scripts.")
-    lines.append("- Config validator and 'suspicious settings' report (NAT/Firewall/VPN).")
+    lines.append("Minimal health-check commands:")
+    lines.append("```sh")
+    lines.append("ndmc -c 'show version'")
+    lines.append("ndmc -c 'show system'")
+    lines.append("ndmc -c 'show interface'")
+    lines.append("ndmc -c 'show log'")
+    lines.append("```")
     lines.append("")
     return "\n".join(lines) + "\n"
-
-
-def index_ru() -> str:
-    return """# Индекс (RU)
-
-- `analysis/REPORT_RU.md` — основной отчёт
-- `analysis/SENSITIVE_LOCATIONS.md` — карта чувствительных мест
-- `fs/` — зеркало файловой системы (configs)
-- `ndm/` — снимки ndmc (KeeneticOS)
-- `entware/` — OPKG + init.d + services.json
-- `net/` — сеть + http probe
-- `web/` — расширенный web probe (если включен)
-- `meta/` — run/errors logs + metrics
-
-"""
-
-
-def index_en() -> str:
-    return """# Index (EN)
-
-- `analysis/REPORT_EN.md` — main report
-- `analysis/SENSITIVE_LOCATIONS.md` — sensitive map
-- `fs/` — filesystem mirror (configs)
-- `ndm/` — ndmc snapshots (KeeneticOS)
-- `entware/` — OPKG + init.d + services.json
-- `net/` — network + http probe
-- `web/` — extended web probe (if enabled)
-- `meta/` — run/errors logs + metrics
-
-"""
-
-
-def cmd_inventory(args: argparse.Namespace) -> int:
-    workdir = Path(args.workdir)
-    inv = build_inventory(workdir)
-    if args.stdout:
-        print(json.dumps(inv, ensure_ascii=False, indent=2))
-    else:
-        out = workdir / "sys" / "collectors" / "python_inventory.json"
-        write_text(out, json.dumps(inv, ensure_ascii=False, indent=2) + "\n")
-    return 0
-
-
-def cmd_report(args: argparse.Namespace) -> int:
-    workdir = Path(args.workdir)
-    inv = build_inventory(workdir)
-
-    # reports
-    write_text(workdir / "analysis" / "REPORT_RU.md", report_ru(workdir, inv))
-    write_text(workdir / "analysis" / "REPORT_EN.md", report_en(workdir, inv))
-    # index
-    write_text(workdir / "analysis" / "INDEX_RU.md", index_ru())
-    write_text(workdir / "analysis" / "INDEX_EN.md", index_en())
-    return 0
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(prog="analyze.py")
-    ap.add_argument("--inventory", dest="inventory", action="store_true", help="build JSON inventory")
-    ap.add_argument("--report", dest="report", action="store_true", help="generate markdown reports")
-    ap.add_argument("--workdir", dest="workdir", default="", help="work directory")
-    ap.add_argument("--stdout", dest="stdout", action="store_true", help="for --inventory: print JSON to stdout")
-
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--workdir", required=True)
+    ap.add_argument("--inventory", action="store_true", help="print JSON inventory")
+    ap.add_argument("--report", action="store_true", help="generate reports into analysis/")
+    ap.add_argument("--stdout", action="store_true", help="print inventory to stdout (instead of writing a file)")
     args = ap.parse_args()
 
-    # back-compat: allow positional workdir in our toolchain, but keep strict enough
-    if not args.workdir:
-        # allow last arg in older call styles, but only if it looks like a path
-        pass
+    workdir = Path(args.workdir).resolve()
+    if not workdir.exists():
+        raise SystemExit(f"workdir not found: {workdir}")
 
-    if args.inventory and args.workdir:
-        return cmd_inventory(args)
-    if args.report and args.workdir:
-        return cmd_report(args)
+    inv = build_inventory(workdir)
 
-    ap.print_help()
-    return 2
+    if args.inventory:
+        if args.stdout:
+            print(json.dumps(inv, indent=2, sort_keys=True))
+        else:
+            write_json(workdir / "analysis" / "INVENTORY.json", inv)
+        return 0
+
+    if args.report:
+        write_json(workdir / "analysis" / "INVENTORY.json", inv)
+        write_text(workdir / "analysis" / "REPORT_RU.md", make_report_ru(inv))
+        write_text(workdir / "analysis" / "REPORT_EN.md", make_report_en(inv))
+        return 0
+
+    # default: generate report
+    write_json(workdir / "analysis" / "INVENTORY.json", inv)
+    write_text(workdir / "analysis" / "REPORT_RU.md", make_report_ru(inv))
+    write_text(workdir / "analysis" / "REPORT_EN.md", make_report_en(inv))
+    return 0
 
 
 if __name__ == "__main__":

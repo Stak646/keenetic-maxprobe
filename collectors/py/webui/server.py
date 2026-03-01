@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-# keenetic-maxprobe Web UI server
-# - Starts probe runs
-# - Streams status/phase/progress/metrics
-# - Lists & serves archives from /var/tmp
+"""
+keenetic-maxprobe Web UI server
+
+Goals:
+- Start/stop a probe run from browser
+- Show live status (phase/progress/metrics)
+- Tail logs
+- List and download archives from /var/tmp (and /tmp as fallback)
+
+This server is intentionally self-contained and dependency-free.
+"""
 
 from __future__ import annotations
 
@@ -10,398 +17,491 @@ import argparse
 import json
 import os
 import re
-import signal
+import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime, timezone
+from http import HTTPStatus
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Dict, List, Optional, Tuple
 
-ROOT = Path(__file__).resolve().parent
-STATIC_DIR = ROOT / "static"
 
-DEFAULT_OUTBASES = ["/var/tmp", "/tmp"]
+DEFAULT_OUTDIRS = [Path("/var/tmp"), Path("/tmp")]
 STATE_DIR = Path("/var/tmp/keenetic-maxprobe-webui")
 STATE_FILE = STATE_DIR / "state.json"
 LOCK_FILE = STATE_DIR / "run.lock"
 
-RUN_PAT = re.compile(r"^keenetic-maxprobe-[A-Za-z0-9._-]+-\d+-\d{8}T\d{6}Z$")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
-def _read_text(p: Path, max_bytes: int = 256 * 1024) -> str:
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_text(path: Path, limit: int = 2_000_000) -> str:
     try:
-        with p.open("rb") as f:
-            data = f.read(max_bytes)
+        data = path.read_bytes()
+        if len(data) > limit:
+            data = data[:limit] + b"\n...<truncated>...\n"
         return data.decode("utf-8", errors="replace")
-    except FileNotFoundError:
+    except Exception:
         return ""
-    except Exception as e:
-        return f"[error reading {p}: {e}]"
 
 
-def _tail_lines(p: Path, n: int = 200) -> str:
-    # Simple tail implementation without external deps
+def safe_int(x: str, default: int) -> int:
     try:
-        data = _read_text(p, max_bytes=1024 * 1024)
-        lines = data.splitlines()
-        return "\n".join(lines[-n:])
-    except Exception as e:
-        return f"[error tailing {p}: {e}]"
-
-
-def _parse_metrics_cur(p: Path) -> Dict[str, Any]:
-    # Format: ts_utc\tcpu_pct\tmem_used_pct\tmem_avail_kb\tload1
-    s = _read_text(p, max_bytes=4096).strip().splitlines()[-1:]  # last line
-    if not s:
-        return {"cpu_pct": 0, "mem_used_pct": 0, "mem_avail_kb": 0, "load1": 0, "ts_utc": ""}
-    parts = s[0].split("\t")
-    try:
-        return {
-            "ts_utc": parts[0] if len(parts) > 0 else "",
-            "cpu_pct": int(float(parts[1])) if len(parts) > 1 and parts[1] else 0,
-            "mem_used_pct": int(float(parts[2])) if len(parts) > 2 and parts[2] else 0,
-            "mem_avail_kb": int(float(parts[3])) if len(parts) > 3 and parts[3] else 0,
-            "load1": float(parts[4]) if len(parts) > 4 and parts[4] else 0,
-        }
+        return int(x)
     except Exception:
-        return {"cpu_pct": 0, "mem_used_pct": 0, "mem_avail_kb": 0, "load1": 0, "ts_utc": ""}
+        return default
 
 
-def _scan_runs(outbases: list[str]) -> Dict[str, Any]:
-    workdirs: list[Dict[str, Any]] = []
-    archives: list[Dict[str, Any]] = []
+def list_ipv4_addrs() -> List[str]:
+    # Best-effort: prefer `ip -4 -o addr show`
+    addrs: List[str] = []
+    try:
+        out = subprocess.check_output(
+            ["ip", "-4", "-o", "addr", "show"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        for line in out.splitlines():
+            # "... inet 192.168.1.1/24 ..."
+            m = re.search(r"\binet\s+(\d+\.\d+\.\d+\.\d+)/", line)
+            if m:
+                ip = m.group(1)
+                if ip != "127.0.0.1":
+                    addrs.append(ip)
+    except Exception:
+        pass
 
-    for base in outbases:
-        b = Path(base)
-        if not b.exists():
+    # Fallback: try hostname resolution (may return 127.0.0.1 only)
+    if not addrs:
+        try:
+            host = socket.gethostname()
+            ip = socket.gethostbyname(host)
+            if ip and ip != "127.0.0.1":
+                addrs.append(ip)
+        except Exception:
+            pass
+
+    # Unique preserve order
+    seen = set()
+    out2: List[str] = []
+    for a in addrs:
+        if a not in seen:
+            out2.append(a)
+            seen.add(a)
+    return out2
+
+
+def find_archives(outdirs: List[Path]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for d in outdirs:
+        if not d.is_dir():
             continue
-
-        for wd in sorted(b.glob("keenetic-maxprobe-*.work"), key=lambda p: p.stat().st_mtime, reverse=True):
-            run_id = wd.name[:-5]  # strip .work
-            if not RUN_PAT.match(run_id):
+        for p in sorted(d.glob("keenetic-maxprobe-*.tar.gz"), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                st = p.stat()
+                items.append(
+                    {
+                        "path": str(p),
+                        "name": p.name,
+                        "size": st.st_size,
+                        "mtime": int(st.st_mtime),
+                        "sha256_path": str(p) + ".sha256" if (p.with_suffix(p.suffix + ".sha256")).exists() else "",
+                    }
+                )
+            except Exception:
                 continue
-            workdirs.append({
-                "id": run_id,
-                "workdir": str(wd),
-                "mtime": int(wd.stat().st_mtime),
-            })
+    return items
 
-        for ar in sorted(b.glob("keenetic-maxprobe-*.tar.gz"), key=lambda p: p.stat().st_mtime, reverse=True):
-            run_id = ar.name[:-7]  # strip .tar.gz
-            if not RUN_PAT.match(run_id):
+
+def find_workdirs(outdirs: List[Path]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for d in outdirs:
+        if not d.is_dir():
+            continue
+        for p in sorted(d.glob("keenetic-maxprobe-*.work"), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                st = p.stat()
+                items.append(
+                    {
+                        "path": str(p),
+                        "name": p.name,
+                        "mtime": int(st.st_mtime),
+                    }
+                )
+            except Exception:
                 continue
-            archives.append({
-                "id": run_id,
-                "archive": str(ar),
-                "sha256": str(ar) + ".sha256",
-                "size": int(ar.stat().st_size),
-                "mtime": int(ar.stat().st_mtime),
-            })
-
-    return {"workdirs": workdirs, "archives": archives}
+    return items
 
 
-def _status_for_workdir(workdir: Path) -> Dict[str, Any]:
-    meta = workdir / "meta"
-    phase = _read_text(meta / "phase.txt", max_bytes=4096).strip() or "..."
-    progress = _read_text(meta / "progress.txt", max_bytes=128).strip() or "0/0"
-    metrics = _parse_metrics_cur(meta / "metrics_current.tsv")
-
-    errors_log = meta / "errors.log"
-    errors_tail = _tail_lines(errors_log, n=50) if errors_log.exists() else ""
-
-    return {
-        "workdir": str(workdir),
-        "phase": phase,
-        "progress": progress,
-        "metrics": metrics,
-        "errors_tail": errors_tail,
-    }
-
-
-def _load_state() -> Dict[str, Any]:
-    if not STATE_FILE.exists():
-        return {}
+def read_state() -> Dict[str, Any]:
     try:
-        return json.loads(_read_text(STATE_FILE))
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
-def _save_state(st: Dict[str, Any]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(st, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(STATE_FILE)
-
-
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
+def write_state(st: Dict[str, Any]) -> None:
     try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
-def _acquire_lock(pid: int) -> bool:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    if LOCK_FILE.exists():
-        # stale lock?
-        try:
-            old = int(_read_text(LOCK_FILE).strip() or "0")
-        except Exception:
-            old = 0
-        if old and _pid_alive(old):
-            return False
-        try:
-            LOCK_FILE.unlink()
-        except Exception:
-            return False
-    try:
-        LOCK_FILE.write_text(str(pid), encoding="utf-8")
-        return True
-    except Exception:
-        return False
-
-
-def _release_lock() -> None:
-    try:
-        if LOCK_FILE.exists():
-            LOCK_FILE.unlink()
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(json.dumps(st, indent=2, sort_keys=True), encoding="utf-8")
     except Exception:
         pass
 
 
-def _start_probe(probe_bin: str, preset: str, lang: str, extra: list[str]) -> Tuple[bool, str, Dict[str, Any]]:
-    # Map presets to args
-    preset = (preset or "forensic").lower()
-    if preset not in {"lite", "diagnostic", "forensic", "extream"}:
-        preset = "forensic"
-
-    args = [probe_bin, "--no-spinner"]
-
-    if lang:
-        args += ["--lang", lang]
-
-    if preset == "lite":
-        args += ["--profile", "lite", "--mode", "safe", "--collectors", "shonly"]
-    elif preset == "diagnostic":
-        args += ["--profile", "diagnostic", "--mode", "safe", "--collectors", "all"]
-    elif preset == "forensic":
-        args += ["--profile", "forensic", "--mode", "full", "--collectors", "all"]
-    elif preset == "extream":
-        args += ["--profile", "forensic", "--mode", "extream", "--collectors", "all", "--deps-level", "collectors"]
-
-    args += extra
-
-    # output dir is fixed by probe itself (/var/tmp)
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    launcher_log = STATE_DIR / "launcher.log"
-
-    # Start process
+def acquire_lock() -> bool:
     try:
-        with launcher_log.open("ab") as lf:
-            p = subprocess.Popen(args, stdout=lf, stderr=lf, close_fds=True)
-    except FileNotFoundError:
-        return False, f"probe binary not found: {probe_bin}", {}
-    except Exception as e:
-        return False, f"failed to start probe: {e}", {}
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        # O_EXCL ensures we do not overwrite if exists
+        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(utc_now())
+        return True
+    except FileExistsError:
+        return False
+    except Exception:
+        return False
 
-    if not _acquire_lock(p.pid):
+
+def release_lock() -> None:
+    try:
+        LOCK_FILE.unlink(missing_ok=True)  # type: ignore[arg-type]
+    except Exception:
         try:
-            p.terminate()
+            if LOCK_FILE.exists():
+                LOCK_FILE.unlink()
         except Exception:
             pass
-        return False, "another run is already active", {}
-
-    st = {
-        "pid": p.pid,
-        "started": int(time.time()),
-        "preset": preset,
-        "probe_bin": probe_bin,
-        "lang": lang,
-        "args": args,
-    }
-    _save_state(st)
-    return True, "started", st
-
-
-class Handler(BaseHTTPRequestHandler):
-    server_version = "keenetic-maxprobe-webui/0.1"
-
-    def _send_json(self, obj: Any, code: int = 200) -> None:
-        data = json.dumps(obj).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def _send_text(self, s: str, code: int = 200, ctype: str = "text/plain; charset=utf-8") -> None:
-        data = s.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        path = parsed.path
-        qs = parse_qs(parsed.query)
-
-        if path == "/api/runs":
-            outbases = DEFAULT_OUTBASES
-            self._send_json(_scan_runs(outbases))
-            return
-
-        if path == "/api/status":
-            outbases = DEFAULT_OUTBASES
-            runs = _scan_runs(outbases)
-            st = _load_state()
-            pid = int(st.get("pid", 0) or 0)
-            alive = _pid_alive(pid)
-
-            # choose the newest workdir if any
-            workdir_status: Optional[Dict[str, Any]] = None
-            if runs["workdirs"]:
-                wd = Path(runs["workdirs"][0]["workdir"])
-                workdir_status = _status_for_workdir(wd)
-
-            # newest archive id
-            latest_archive = runs["archives"][0] if runs["archives"] else None
-
-            self._send_json({
-                "state": st,
-                "alive": alive,
-                "work": workdir_status,
-                "latest_archive": latest_archive,
-                "server_time": int(time.time()),
-            })
-            return
-
-        if path == "/api/log":
-            # tail run.log if workdir exists
-            outbases = DEFAULT_OUTBASES
-            runs = _scan_runs(outbases)
-            n = int((qs.get("n") or ["200"])[0])
-            if runs["workdirs"]:
-                wd = Path(runs["workdirs"][0]["workdir"])
-                logp = wd / "meta" / "run.log"
-                self._send_text(_tail_lines(logp, n=n))
-            else:
-                # fallback to launcher log
-                self._send_text(_tail_lines(STATE_DIR / "launcher.log", n=n))
-            return
-
-        if path == "/api/start":
-            preset = (qs.get("preset") or ["forensic"])[0]
-            lang = (qs.get("lang") or [""])[0]
-            ok, msg, st = _start_probe(self.server.probe_bin, preset=preset, lang=lang, extra=[])
-            self._send_json({"ok": ok, "msg": msg, "state": st}, code=200 if ok else 409)
-            return
-
-        if path == "/api/stop":
-            st = _load_state()
-            pid = int(st.get("pid", 0) or 0)
-            if pid and _pid_alive(pid):
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                    time.sleep(0.2)
-                except Exception as e:
-                    self._send_json({"ok": False, "msg": str(e)}, code=500)
-                    return
-            _release_lock()
-            self._send_json({"ok": True, "msg": "stopped"})
-            return
-
-        if path.startswith("/download/"):
-            # Serve only keenetic-maxprobe archives from /var/tmp
-            fn = path[len("/download/") :]
-            fn = fn.replace("..", "")
-            if not (fn.endswith(".tar.gz") or fn.endswith(".tar.gz.sha256")):
-                self._send_text("bad filename", code=400)
-                return
-            p = Path("/var/tmp") / fn
-            if not p.exists():
-                self._send_text("not found", code=404)
-                return
-            # Stream file
-            try:
-                self.send_response(200)
-                ctype = "application/gzip" if fn.endswith(".tar.gz") else "text/plain; charset=utf-8"
-                self.send_header("Content-Type", ctype)
-                self.send_header("Content-Length", str(p.stat().st_size))
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                with p.open("rb") as f:
-                    while True:
-                        chunk = f.read(1024 * 128)
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-            except Exception as e:
-                try:
-                    self._send_text(f"error: {e}", code=500)
-                except Exception:
-                    pass
-            return
-
-        # Static
-        if path == "/":
-            path = "/index.html"
-        sp = (STATIC_DIR / path.lstrip("/")).resolve()
-        if not str(sp).startswith(str(STATIC_DIR.resolve())):
-            self._send_text("not found", code=404)
-            return
-        if not sp.exists() or not sp.is_file():
-            self._send_text("not found", code=404)
-            return
-
-        ctype = "text/html; charset=utf-8"
-        if sp.name.endswith(".js"):
-            ctype = "application/javascript; charset=utf-8"
-        elif sp.name.endswith(".css"):
-            ctype = "text/css; charset=utf-8"
-
-        self._send_text(_read_text(sp, max_bytes=2 * 1024 * 1024), ctype=ctype)
-
-    def log_message(self, fmt: str, *args: Any) -> None:
-        # Quiet default logging (keep router load low)
-        return
 
 
 class WebUIServer(ThreadingHTTPServer):
-    def __init__(self, server_address: Tuple[str, int], RequestHandlerClass: Any, probe_bin: str):
-        super().__init__(server_address, RequestHandlerClass)
+    allow_reuse_address = True
+
+    def __init__(self, server_address: Tuple[str, int], handler_cls, probe_bin: str, lang: str, outdirs: List[Path]):
+        super().__init__(server_address, handler_cls)
         self.probe_bin = probe_bin
+        self.lang = lang
+        self.outdirs = outdirs
+        self._run_proc: Optional[subprocess.Popen] = None
+        self._run_thread: Optional[threading.Thread] = None
+
+
+class Handler(SimpleHTTPRequestHandler):
+    server: WebUIServer  # type: ignore[assignment]
+
+    def log_message(self, fmt: str, *args) -> None:
+        # Keep stdout clean; state is in run.log
+        sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], utc_now(), fmt % args))
+
+    def _send_json(self, obj: Any, status: int = 200) -> None:
+        data = json.dumps(obj, indent=2, sort_keys=True).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_text(self, text: str, status: int = 200, ctype: str = "text/plain; charset=utf-8") -> None:
+        data = text.encode("utf-8", errors="replace")
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_static(self, rel: str) -> None:
+        path = (STATIC_DIR / rel).resolve()
+        if not str(path).startswith(str(STATIC_DIR.resolve())):
+            self._send_text("forbidden", status=403)
+            return
+        if not path.exists():
+            self._send_text("not found", status=404)
+            return
+        ctype = "text/plain; charset=utf-8"
+        if path.suffix == ".html":
+            ctype = "text/html; charset=utf-8"
+        elif path.suffix == ".css":
+            ctype = "text/css; charset=utf-8"
+        elif path.suffix == ".js":
+            ctype = "application/javascript; charset=utf-8"
+        self._send_text(read_text(path), status=200, ctype=ctype)
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path in ("/", "/index.html"):
+            self._serve_static("index.html")
+            return
+        if self.path == "/app.js":
+            self._serve_static("app.js")
+            return
+        if self.path == "/style.css":
+            self._serve_static("style.css")
+            return
+
+        if self.path.startswith("/api/status"):
+            self._handle_status()
+            return
+        if self.path.startswith("/api/runs"):
+            self._handle_runs()
+            return
+        if self.path.startswith("/api/log"):
+            self._handle_log()
+            return
+        if self.path.startswith("/api/start"):
+            self._handle_start()
+            return
+        if self.path.startswith("/api/stop"):
+            self._handle_stop()
+            return
+        if self.path.startswith("/download?path="):
+            self._handle_download()
+            return
+
+        self._send_text("not found", status=404)
+
+    def _handle_status(self) -> None:
+        st = read_state()
+        # try to enrich with meta from the most recent workdir
+        workdirs = find_workdirs(self.server.outdirs)
+        meta: Dict[str, Any] = {}
+        if workdirs:
+            wd = Path(workdirs[0]["path"])
+            phase = read_text(wd / "meta" / "phase.txt", limit=10_000).strip()
+            prog = read_text(wd / "meta" / "progress.txt", limit=1000).strip()
+            metrics = read_text(wd / "meta" / "metrics_current.tsv", limit=1000).strip()
+            meta = {"workdir": str(wd), "phase": phase, "progress": prog, "metrics_current": metrics}
+
+        st_out = {"state": st, "meta": meta, "utc": utc_now()}
+        self._send_json(st_out)
+
+    def _handle_runs(self) -> None:
+        self._send_json(
+            {
+                "archives": find_archives(self.server.outdirs),
+                "workdirs": find_workdirs(self.server.outdirs),
+                "outdirs": [str(d) for d in self.server.outdirs],
+                "utc": utc_now(),
+            }
+        )
+
+    def _handle_log(self) -> None:
+        # query string: ?n=200
+        n = 200
+        try:
+            m = re.search(r"[?&]n=(\d+)", self.path)
+            if m:
+                n = min(5000, max(10, int(m.group(1))))
+        except Exception:
+            n = 200
+
+        workdirs = find_workdirs(self.server.outdirs)
+        if not workdirs:
+            self._send_text("no active workdir found", status=200)
+            return
+        wd = Path(workdirs[0]["path"])
+        logp = wd / "meta" / "run.log"
+        errp = wd / "meta" / "errors.log"
+        log_txt = read_text(logp, limit=500_000)
+        err_txt = read_text(errp, limit=200_000)
+
+        # tail last n lines (cheap)
+        log_lines = log_txt.splitlines()[-n:]
+        err_lines = err_txt.splitlines()[-n:]
+        out = []
+        if err_lines:
+            out.append("=== errors.log (tail) ===")
+            out.extend(err_lines)
+        if log_lines:
+            out.append("\n=== run.log (tail) ===")
+            out.extend(log_lines)
+        self._send_text("\n".join(out), status=200)
+
+    def _handle_start(self) -> None:
+        qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+        preset = "forensic"
+        lang = self.server.lang
+        for part in qs.split("&"):
+            if part.startswith("preset="):
+                preset = part.split("=", 1)[1] or preset
+            if part.startswith("lang="):
+                lang = part.split("=", 1)[1] or lang
+
+        preset = preset.strip()
+        if preset not in {"lite", "diagnostic", "forensic", "extream", "safe", "full"}:
+            preset = "forensic"
+
+        if not acquire_lock():
+            self._send_json({"ok": False, "error": "run already active (lock exists)"}, status=409)
+            return
+
+        # Build args
+        args = [self.server.probe_bin, "--lang", lang]
+        if preset in {"lite", "diagnostic", "forensic"}:
+            args += ["--profile", preset, "--mode", "full"]
+        elif preset == "safe":
+            args += ["--mode", "safe"]
+        elif preset == "full":
+            args += ["--mode", "full"]
+        elif preset == "extream":
+            args += ["--mode", "extream", "--deps-level", "collectors"]
+
+        st = {"active": True, "started_utc": utc_now(), "preset": preset, "args": args}
+        write_state(st)
+
+        def runner() -> None:
+            try:
+                with subprocess.Popen(
+                    args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                ) as proc:
+                    self.server._run_proc = proc
+                    # Stream to state_dir log as well
+                    logp = STATE_DIR / "webui_run_stream.log"
+                    with logp.open("a", encoding="utf-8") as f:
+                        f.write(f"\n=== start {utc_now()} preset={preset} ===\n")
+                        for line in proc.stdout or []:
+                            f.write(line)
+                    rc = proc.wait()
+                    st2 = read_state()
+                    st2.update({"active": False, "finished_utc": utc_now(), "returncode": rc})
+                    write_state(st2)
+            except Exception as e:
+                st2 = read_state()
+                st2.update({"active": False, "finished_utc": utc_now(), "error": str(e)})
+                write_state(st2)
+            finally:
+                self.server._run_proc = None
+                release_lock()
+
+        t = threading.Thread(target=runner, daemon=True)
+        self.server._run_thread = t
+        t.start()
+
+        self._send_json({"ok": True, "state": st})
+
+    def _handle_stop(self) -> None:
+        proc = self.server._run_proc
+        if not proc:
+            # Still clear lock if stale
+            release_lock()
+            st = read_state()
+            st["active"] = False
+            write_state(st)
+            self._send_json({"ok": True, "stopped": False, "note": "no running process"})
+            return
+
+        try:
+            proc.terminate()
+            self._send_json({"ok": True, "stopped": True})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)}, status=500)
+
+    def _handle_download(self) -> None:
+        q = self.path.split("?", 1)[1] if "?" in self.path else ""
+        m = re.search(r"(?:^|&)path=([^&]+)", q)
+        if not m:
+            self._send_text("bad request", status=400)
+            return
+        req = m.group(1)
+        # decode minimal percent-encoding for spaces etc.
+        try:
+            from urllib.parse import unquote
+
+            req = unquote(req)
+        except Exception:
+            pass
+
+        path = Path(req).resolve()
+        # allow only under outdirs
+        allowed = any(str(path).startswith(str(d.resolve()) + os.sep) for d in self.server.outdirs)
+        if not allowed:
+            self._send_text("forbidden", status=403)
+            return
+        if not path.exists() or not path.is_file():
+            self._send_text("not found", status=404)
+            return
+
+        # Stream file
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        self.send_header("Content-Length", str(path.stat().st_size))
+        self.end_headers()
+        with path.open("rb") as f:
+            shutil.copyfileobj(f, self.wfile)
+
+
+def bind_server(bind: str, port: int, handler_cls, probe_bin: str, lang: str, outdirs: List[Path]) -> Tuple[WebUIServer, int]:
+    # If port == 0, bind once and return actual port
+    if port == 0:
+        srv = WebUIServer((bind, 0), handler_cls, probe_bin=probe_bin, lang=lang, outdirs=outdirs)
+        return srv, srv.server_address[1]
+
+    last_exc: Optional[OSError] = None
+    for p in range(port, port + 20):
+        try:
+            srv = WebUIServer((bind, p), handler_cls, probe_bin=probe_bin, lang=lang, outdirs=outdirs)
+            return srv, p
+        except OSError as e:
+            last_exc = e
+            if getattr(e, "errno", None) == 98:  # EADDRINUSE
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise OSError("Failed to bind server")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bind", default="127.0.0.1")
-    ap.add_argument("--port", default=8088, type=int)
+    ap.add_argument("--port", type=int, default=8088)
     ap.add_argument("--lang", default="ru")
-    ap.add_argument("--probe-bin", default="/opt/bin/keenetic-maxprobe")
+    ap.add_argument("--probe-bin", default="keenetic-maxprobe")
     args = ap.parse_args()
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-    srv = WebUIServer((args.bind, args.port), Handler, probe_bin=args.probe_bin)
-    print(f"[+] keenetic-maxprobe Web UI listening on http://{args.bind}:{args.port}/", file=sys.stderr)
+    # Prefer /var/tmp, but if missing, fallback to /tmp
+    outdirs = [d for d in DEFAULT_OUTDIRS if d.is_dir()] or DEFAULT_OUTDIRS
+
+    try:
+        srv, port = bind_server(args.bind, int(args.port), Handler, probe_bin=args.probe_bin, lang=args.lang, outdirs=outdirs)
+    except OSError as e:
+        if getattr(e, "errno", None) == 98:
+            sys.stderr.write(f"[!] Port is busy: {args.bind}:{args.port}\n")
+            sys.stderr.write("    Stop the previous instance or choose another port: --port 8089\n")
+            sys.stderr.write("    To find who listens: ss -lntp | grep :8088  (or netstat -lntp)\n")
+            return 98
+        raise
+
+    base_url = f"http://{args.bind}:{port}/"
+    sys.stderr.write(f"[+] Web UI listening on {base_url}\n")
+
+    if args.bind in {"0.0.0.0", "::"}:
+        ips = list_ipv4_addrs()
+        if ips:
+            sys.stderr.write("[+] Open from LAN:\n")
+            for ip in ips:
+                sys.stderr.write(f"    http://{ip}:{port}/\n")
+
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
-        pass
+        sys.stderr.write("\n[+] Stopped.\n")
     finally:
-        srv.server_close()
-
+        try:
+            srv.server_close()
+        except Exception:
+            pass
+        # do not remove lock automatically (may be used by active run)
     return 0
 
 

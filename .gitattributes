@@ -1,0 +1,4 @@
+*.sh text eol=lf
+keenetic-maxprobe text eol=lf
+bin/keenetic-maxprobe text eol=lf
+*.py text eol=lf

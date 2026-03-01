@@ -1,73 +1,289 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>keenetic-maxprobe</title>
-<link rel="stylesheet" href="/static/style.css"/>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>keenetic-maxprobe Web UI</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <div class="title">keenetic-maxprobe</div>
-    <div id="dot" class="dot idle"></div>
-    <div id="line" class="status">loading...</div>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="header">
+    <div class="header__title">
+      <h1>keenetic-maxprobe</h1>
+      <p class="muted">Web UI — запуск и контроль диагностики</p>
+    </div>
+
+    <div class="header__token" aria-label="API token">
+      <label for="tokenInput">Token</label>
+      <input id="tokenInput" type="password" autocomplete="off" inputmode="text" placeholder="token" />
+      <button id="tokenSaveBtn" type="button">Save</button>
+    </div>
   </header>
 
-  <section class="panel">
-    <h2>Запуск</h2>
-    <div class="row"><label>Профиль</label>
-      <select id="profile">
-        <option value="lite">lite</option>
-        <option value="diagnostic">diagnostic</option>
-        <option value="forensic" selected>forensic</option>
-      </select>
-    </div>
-    <div class="row"><label>Режим</label>
-      <select id="mode">
-        <option value="full" selected>full</option>
-        <option value="safe">safe</option>
-        <option value="extream">extream</option>
-      </select>
-    </div>
-    <div class="row"><label>Collectors</label>
-      <select id="collectors">
-        <option value="all" selected>all</option>
-        <option value="shonly">shonly</option>
-        <option value="shpy">shpy</option>
-      </select>
-    </div>
-    <div class="row"><label>Deps (extream)</label>
-      <select id="deps_level">
-        <option value="core" selected>core</option>
-        <option value="collectors">collectors</option>
-      </select>
-    </div>
-    <button id="start">Старт</button>
-    <div id="resp" class="muted"></div>
-  </section>
+  <main id="main" class="container">
+    <section class="card" aria-label="Status">
+      <h2>Status</h2>
 
-  <section class="panel">
-    <h2>Состояние</h2>
-    <div class="kv"><span>Phase</span><span id="phase">-</span></div>
-    <div class="kv"><span>Progress</span><span id="progress">-</span></div>
-    <div class="kv"><span>CPU</span><span id="cpu">-</span></div>
-    <div class="kv"><span>RAM</span><span id="mem">-</span></div>
-    <div class="kv"><span>Load1</span><span id="load1">-</span></div>
-  </section>
+      <div class="grid2">
+        <div>
+          <div><span class="k">State:</span> <span id="stateValue">—</span></div>
+          <div><span class="k">PID:</span> <span id="pidValue">—</span></div>
+          <div><span class="k">Started:</span> <span id="startedValue">—</span></div>
+          <div><span class="k">Phase:</span> <span id="phaseValue">—</span></div>
+          <div><span class="k">Progress:</span> <span id="progressValue">—</span></div>
+        </div>
+        <div>
+          <div><span class="k">Workdir:</span> <span id="workdirValue" class="mono">—</span></div>
+          <div><span class="k">OPKG storage:</span> <span id="opkgValue">—</span></div>
+          <div><span class="k">Output base:</span> <span id="outbaseValue" class="mono">—</span></div>
+          <div><span class="k">Tool:</span> <span id="toolValue">—</span></div>
+          <div><span class="k">Listening ports:</span> <span id="portsValue">—</span></div>
+        </div>
+      </div>
 
-  <section class="panel">
-    <h2>Лог (tail)</h2>
-    <pre id="log" class="log"></pre>
-  </section>
+      <div class="row">
+        <progress id="progressBar" value="0" max="100" aria-label="Progress bar"></progress>
+      </div>
 
-  <section class="panel">
-    <h2>Архивы</h2>
-    <div id="archives"></div>
-  </section>
+      <details class="row">
+        <summary>Command</summary>
+        <pre id="cmdValue" class="mono pre">—</pre>
+      </details>
 
-  <footer class="muted">Хранение: /var/tmp. В extream могут быть чувствительные данные.</footer>
-</div>
-<script src="/static/app.js"></script>
+      <div id="apiError" class="alert" role="alert" aria-live="polite" hidden></div>
+    </section>
+
+    <section class="card" aria-label="Run parameters">
+      <h2>Run parameters</h2>
+
+      <form id="runForm">
+        <fieldset>
+          <legend>Core</legend>
+
+          <div class="grid3">
+            <div>
+              <label for="langSelect">Language</label>
+              <select id="langSelect" name="LANG_UI">
+                <option value="ru">ru</option>
+                <option value="en">en</option>
+              </select>
+            </div>
+
+            <div>
+              <label for="modeSelect">Mode</label>
+              <select id="modeSelect" name="MODE">
+                <option value="safe">safe</option>
+                <option value="full">full</option>
+                <option value="extream">extream</option>
+              </select>
+            </div>
+
+            <div>
+              <label for="profileSelect">Profile</label>
+              <select id="profileSelect" name="PROFILE">
+                <option value="auto">auto</option>
+                <option value="lite">lite</option>
+                <option value="diagnostic">diagnostic</option>
+                <option value="forensic">forensic</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="grid2">
+            <div>
+              <label for="collectorsSelect">Collectors</label>
+              <select id="collectorsSelect" name="COLLECTORS">
+                <option value="all">all</option>
+                <option value="shonly">shonly</option>
+                <option value="shpy">shpy</option>
+                <option value="custom">custom</option>
+              </select>
+              <p class="help">custom → заполните поле ниже (py,go,lua,node,perl,ruby)</p>
+            </div>
+
+            <div>
+              <label for="customCollectorsInput">Custom collectors</label>
+              <input id="customCollectorsInput" name="CUSTOM_COLLECTORS" type="text" placeholder="py,lua,node" />
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Output</legend>
+          <div class="grid2">
+            <div>
+              <label for="outPolicySelect">OUTBASE_POLICY</label>
+              <select id="outPolicySelect" name="OUTBASE_POLICY">
+                <option value="auto">auto</option>
+                <option value="ram">ram</option>
+                <option value="entware">entware</option>
+              </select>
+            </div>
+
+            <div>
+              <label for="outOverrideInput">OUTBASE_OVERRIDE</label>
+              <input id="outOverrideInput" name="OUTBASE_OVERRIDE" type="text" placeholder="/opt/var/tmp" />
+            </div>
+          </div>
+
+          <div class="grid3">
+            <label class="check">
+              <input type="checkbox" id="cleanOldChk" name="CLEAN_OLD">
+              Clean old archives
+            </label>
+            <label class="check">
+              <input type="checkbox" id="cleanTmpChk" name="CLEAN_TMP">
+              Clean /tmp before run
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Deps & limits</legend>
+
+          <div class="grid3">
+            <div>
+              <label for="depsLevelSelect">DEPS_LEVEL</label>
+              <select id="depsLevelSelect" name="DEPS_LEVEL">
+                <option value="core">core</option>
+                <option value="collectors">collectors</option>
+              </select>
+            </div>
+
+            <div>
+              <label for="depsModeSelect">DEPS_MODE</label>
+              <select id="depsModeSelect" name="DEPS_MODE">
+                <option value="cleanup">cleanup</option>
+                <option value="keep">keep</option>
+              </select>
+            </div>
+
+            <label class="check">
+              <input type="checkbox" id="noInstallChk" name="NO_INSTALL">
+              --no-install
+            </label>
+          </div>
+
+          <div class="grid3">
+            <div>
+              <label for="maxCpuInput">MAX_CPU</label>
+              <input id="maxCpuInput" name="MAX_CPU" type="number" min="1" max="100" />
+            </div>
+            <div>
+              <label for="maxMemInput">MAX_MEM</label>
+              <input id="maxMemInput" name="MAX_MEM" type="number" min="1" max="100" />
+            </div>
+            <div>
+              <label for="jobsInput">JOBS</label>
+              <input id="jobsInput" name="JOBS" type="text" placeholder="auto / 1 / 2" />
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>UX</legend>
+          <div class="grid3">
+            <label class="check">
+              <input type="checkbox" id="debugChk" name="DEBUG">
+              Debug
+            </label>
+            <label class="check">
+              <input type="checkbox" id="spinnerChk" name="SPINNER" disabled>
+              Spinner (forced off in Web UI)
+            </label>
+            <label class="check">
+              <input type="checkbox" id="yesChk" name="YES" checked disabled>
+              --yes (forced on)
+            </label>
+          </div>
+        </fieldset>
+
+        <div class="row actions">
+          <button id="startBtn" type="submit">Start</button>
+          <button id="stopBtn" type="button" class="danger">Stop</button>
+          <button id="saveDefaultsBtn" type="button">Save defaults</button>
+        </div>
+      </form>
+
+      <p class="help">
+        Примечание: Web UI запускает CLI с <code>--no-spinner --yes</code> и показывает прогресс через <code>meta/phase.txt</code> и <code>meta/progress.txt</code>.
+      </p>
+    </section>
+
+    <section class="card" aria-label="Logs">
+      <h2>Logs (tail)</h2>
+
+      <div class="row">
+        <label for="logKindSelect">Log</label>
+        <select id="logKindSelect">
+          <option value="run">meta/run.log</option>
+          <option value="errors">meta/errors.log</option>
+        </select>
+      </div>
+
+      <pre id="logBox" class="mono pre log" aria-label="Log output">—</pre>
+    </section>
+
+    
+    <section class="card" aria-label="Report">
+      <h2>Report</h2>
+
+      <div class="row">
+        <label for="reportLangSelect">Language</label>
+        <select id="reportLangSelect">
+          <option value="ru">REPORT_RU.md</option>
+          <option value="en">REPORT_EN.md</option>
+        </select>
+      </div>
+
+      <div class="row actions">
+        <button id="loadReportBtn" type="button">Load report</button>
+      </div>
+
+      <pre id="reportBox" class="mono pre log" aria-label="Report output">—</pre>
+
+      <p class="help">
+        Это содержимое берётся из <code>analysis/REPORT_*.md</code> последнего workdir.
+      </p>
+    </section>
+
+<section class="card" aria-label="Archives">
+      <h2>Archives</h2>
+
+      <div class="row">
+        <button id="refreshBtn" type="button">Refresh</button>
+      </div>
+
+      <div class="tableWrap">
+        <table class="table" aria-label="Archives list">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Size</th>
+              <th>Modified</th>
+              <th>Download</th>
+            </tr>
+          </thead>
+          <tbody id="archivesBody">
+            <tr><td colspan="4" class="muted">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="help">
+        Скачивание требует token. Используйте ссылку вида <code>/download/&lt;file&gt;?token=...</code>.
+      </p>
+    </section>
+
+    <footer class="footer">
+      <p class="muted">
+        Security: если Web UI доступен по LAN (0.0.0.0), не разглашайте token.
+      </p>
+    </footer>
+  </main>
+
+  <script src="/static/app.js"></script>
 </body>
 </html>

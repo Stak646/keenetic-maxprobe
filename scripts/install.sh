@@ -1,62 +1,151 @@
 #!/bin/sh
-# keenetic-maxprobe installer (Entware/Keenetic)
 set -eu
 
-REPO="https://github.com/Stak646/keenetic-maxprobe"
-TARBALL="${REPO}/archive/refs/heads/main.tar.gz"
+PROG="keenetic-maxprobe"
+REPO="Stak646/keenetic-maxprobe"
+BRANCH="main"
 
 say() { printf '%s\n' "$*" >&2; }
-need() { command -v "$1" >/dev/null 2>&1; }
-ensure_dir() { [ -d "$1" ] || mkdir -p "$1"; }
 
-BIN="/opt/bin"
-SHARE="/opt/share/keenetic-maxprobe"
-TMP="/tmp/keenetic-maxprobe-install.$$"
+have() { command -v "$1" >/dev/null 2>&1; }
 
-cleanup() { rm -rf "$TMP" 2>/dev/null || true; }
-trap cleanup EXIT INT TERM
+need() {
+  have "$1" || { say "[!] Missing required command: $1"; exit 1; }
+}
 
-ensure_dir "$BIN"
-ensure_dir "$SHARE"
+# Best-effort download helper
+fetch() {
+  url="$1"
+  out="$2"
 
-say "[+] Installing keenetic-maxprobe from $TARBALL"
-
-if need opkg; then
-  opkg update >/dev/null 2>&1 || true
-  need curl || opkg install curl >/dev/null 2>&1 || true
-  need wget || opkg install wget-ssl >/dev/null 2>&1 || opkg install wget-nossl >/dev/null 2>&1 || true
-  need tar  || opkg install tar >/dev/null 2>&1 || true
-  need gzip || opkg install gzip >/dev/null 2>&1 || true
-fi
-
-ensure_dir "$TMP"
-cd "$TMP"
-
-if need curl; then
-  curl -fsSL "$TARBALL" -o main.tar.gz
-elif need wget; then
-  wget -qO main.tar.gz "$TARBALL"
-else
-  say "[-] Need curl or wget"
+  if have curl; then
+    curl -fSL "$url" -o "$out"
+    return 0
+  fi
+  if have wget; then
+    wget -O "$out" "$url"
+    return 0
+  fi
+  say "[!] Need curl or wget"
   exit 1
-fi
+}
 
-tar -xzf main.tar.gz
-SRC_DIR="$(find . -maxdepth 1 -type d -name 'keenetic-maxprobe-*' | head -n 1)"
-[ -n "$SRC_DIR" ] || { say "[-] Cannot find extracted source dir"; exit 1; }
+# Pick router LAN IP (best-effort)
+guess_ip() {
+  if have ip; then
+    ip -4 addr 2>/dev/null | awk '/inet / && $2 !~ /^127\./ {sub(/\/.*/,"",$2); print $2; exit}' || true
+  fi
+}
 
-cp -f "$SRC_DIR/bin/keenetic-maxprobe" "$BIN/keenetic-maxprobe"
-chmod +x "$BIN/keenetic-maxprobe"
+need tar
+need sh
 
+TMP="/tmp/${PROG}.$$"
+mkdir -p "$TMP"
+trap 'rm -rf "$TMP" 2>/dev/null || true' EXIT INT TERM
+
+ARCHIVE_URL="https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz"
+ARCHIVE="$TMP/src.tar.gz"
+
+say "[*] Download: $ARCHIVE_URL"
+fetch "$ARCHIVE_URL" "$ARCHIVE"
+
+say "[*] Extract..."
+tar -xzf "$ARCHIVE" -C "$TMP"
+
+SRC_DIR="$(find "$TMP" -maxdepth 1 -type d -name "${PROG}-*" | head -n 1)"
+[ -n "$SRC_DIR" ] || { say "[!] Failed to locate extracted dir"; exit 1; }
+
+# Install paths (Entware/OPKG)
+BIN_DIR="/opt/bin"
+SHARE_DIR="/opt/share/${PROG}"
+COLLECTORS_DST="${SHARE_DIR}/collectors"
+DOCS_DST="${SHARE_DIR}/docs"
+INITD_DIR="/opt/etc/init.d"
+CFG="/opt/etc/${PROG}.conf"
+
+mkdir -p "$BIN_DIR" "$COLLECTORS_DST" "$DOCS_DST" "$INITD_DIR"
+
+say "[*] Install: $BIN_DIR/keenetic-maxprobe"
+cp -f "$SRC_DIR/bin/keenetic-maxprobe" "$BIN_DIR/keenetic-maxprobe"
+chmod +x "$BIN_DIR/keenetic-maxprobe"
+
+# Optional helper
 if [ -f "$SRC_DIR/scripts/entwarectl" ]; then
-  cp -f "$SRC_DIR/scripts/entwarectl" "$BIN/entwarectl"
-  chmod +x "$BIN/entwarectl"
-  say "[+] Helper:   $BIN/entwarectl"
+  say "[*] Install: $BIN_DIR/entwarectl"
+  cp -f "$SRC_DIR/scripts/entwarectl" "$BIN_DIR/entwarectl"
+  chmod +x "$BIN_DIR/entwarectl" || true
 fi
 
-rm -rf "$SHARE/collectors" 2>/dev/null || true
-cp -a "$SRC_DIR/collectors" "$SHARE/collectors"
+say "[*] Install collectors -> $COLLECTORS_DST"
+rm -rf "$COLLECTORS_DST"/*
+cp -a "$SRC_DIR/collectors/." "$COLLECTORS_DST/"
 
-say "[+] Installed: $BIN/keenetic-maxprobe"
-say "[+] Collectors: $SHARE/collectors"
-say "[+] Run: keenetic-maxprobe (or keenetic-maxprobe --init)"
+say "[*] Install docs -> $DOCS_DST"
+rm -rf "$DOCS_DST"/*
+cp -a "$SRC_DIR/docs/." "$DOCS_DST/"
+
+# Init script for Web UI
+if [ -f "$SRC_DIR/scripts/init.d/S99keenetic-maxprobe-webui" ]; then
+  say "[*] Install init script -> $INITD_DIR/S99keenetic-maxprobe-webui"
+  cp -f "$SRC_DIR/scripts/init.d/S99keenetic-maxprobe-webui" "$INITD_DIR/S99keenetic-maxprobe-webui"
+  chmod +x "$INITD_DIR/S99keenetic-maxprobe-webui" || true
+fi
+
+# Create config if missing
+if [ ! -f "$CFG" ]; then
+  say "[*] Create config: $CFG"
+  cat >"$CFG" <<'EOF_CFG'
+# keenetic-maxprobe config
+
+# UI language: ru|en
+LANG_UI="ru"
+
+# default run parameters
+PROFILE="auto"
+MODE="full"
+COLLECTORS="all"
+CUSTOM_COLLECTORS=""
+
+# output base selection: auto|ram|entware
+OUTBASE_POLICY="auto"
+OUTBASE_OVERRIDE=""
+
+# web ui
+WEB_BIND="0.0.0.0"
+WEB_PORT="8088"
+WEB_TOKEN=""
+EOF_CFG
+fi
+
+# Ensure python3 for Web UI (best-effort)
+if have opkg; then
+  if ! have python3; then
+    say "[*] Installing python3 (for Web UI)..."
+    opkg update >/dev/null 2>&1 || true
+    opkg install python3 >/dev/null 2>&1 || true
+  fi
+fi
+
+# Start Web UI service now (best-effort)
+if [ -x "$INITD_DIR/S99keenetic-maxprobe-webui" ]; then
+  say "[*] Starting Web UI service..."
+  "$INITD_DIR/S99keenetic-maxprobe-webui" restart >/dev/null 2>&1 || true
+fi
+
+# Show URL and token
+TOKEN="$(awk -F= '/^WEB_TOKEN=/{gsub(/"/,"",$2); print $2}' "$CFG" 2>/dev/null || true)"
+if [ -z "$TOKEN" ]; then
+  # The web server generates token on first start; try to read again after start
+  sleep 1
+  TOKEN="$(awk -F= '/^WEB_TOKEN=/{gsub(/"/,"",$2); print $2}' "$CFG" 2>/dev/null || true)"
+fi
+
+IP="$(guess_ip || true)"
+[ -n "$IP" ] || IP="<router-ip>"
+
+say ""
+say "[+] Installed."
+say "[+] Run CLI: keenetic-maxprobe"
+say "[+] Web UI: http://${IP}:8088/?token=${TOKEN:-<TOKEN>}"
+say ""

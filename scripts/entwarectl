@@ -1,77 +1,26 @@
 #!/bin/sh
-# entwarectl — unified control for OPKG/Entware init.d services
-# Version: 0.6.1
+# entwarectl — tiny helper for Entware/OPKG mount diagnostics
+set -u
 
-set -eu
+say() { printf '%s\n' "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
 
-BASE="/opt/etc/init.d"
-
-usage() {
-  cat >&2 <<'USAGE'
-usage:
-  entwarectl [--prefix /opt] list
-  entwarectl [--prefix /opt] status  <service>
-  entwarectl [--prefix /opt] start   <service>
-  entwarectl [--prefix /opt] stop    <service>
-  entwarectl [--prefix /opt] restart <service>
-  entwarectl [--prefix /opt] enable  <service>   # chmod +x
-  entwarectl [--prefix /opt] disable <service>   # chmod -x
-
-notes:
-- on Keenetic, OPKG mounts selected storage to /opt; this wrapper supports other prefixes for portability
-- <service> is the init script filename from <prefix>/etc/init.d
-USAGE
-}
-
-need_base() {
-  [ -d "$BASE" ] || { echo "init.d not found: $BASE" >&2; exit 1; }
-}
-
-need_svc() {
-  svc="$1"
-  [ -n "$svc" ] || { usage; exit 2; }
-  script="$BASE/$svc"
-  [ -f "$script" ] || { echo "no such init script: $script" >&2; exit 1; }
-}
-
-# args
-prefix=""
-if [ "${1:-}" = "--prefix" ]; then
-  prefix="${2:-}"; shift 2
-fi
-if [ -n "$prefix" ]; then
-  BASE="$prefix/etc/init.d"
+if have mount; then
+  say "== mount | grep /opt =="
+  mount | awk '$3=="/opt"{print}'
 fi
 
-cmd="${1:-}"
-svc="${2:-}"
+say ""
+say "== df -h /opt =="
+if have df; then
+  df -h /opt 2>/dev/null || true
+fi
 
-case "$cmd" in
-  list)
-    need_base
-    ls -1 "$BASE" 2>/dev/null || true
-    ;;
-  enable)
-    need_svc "$svc"
-    chmod +x "$script" 2>/dev/null || true
-    echo "enabled: $svc"
-    ;;
-  disable)
-    need_svc "$svc"
-    chmod -x "$script" 2>/dev/null || true
-    echo "disabled: $svc"
-    ;;
-  start|stop|restart|status)
-    need_svc "$svc"
-    [ -x "$script" ] || { echo "script not executable (disabled?): $script" >&2; exit 1; }
-    "$script" "$cmd"
-    ;;
-  ""|help|-h|--help)
-    usage
-    ;;
-  *)
-    echo "unknown command: $cmd" >&2
-    usage
-    exit 2
-    ;;
-esac
+say ""
+say "== /proc/mounts /opt =="
+awk '$2=="/opt"{print}' /proc/mounts 2>/dev/null || true
+
+say ""
+say "Hint:"
+say "- /dev/sdX ... usually USB drive"
+say "- ubifs/ubi... usually internal storage"

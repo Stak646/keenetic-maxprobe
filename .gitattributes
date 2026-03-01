@@ -1,5 +1,4 @@
-# Enforce LF endings for scripts (router expects LF)
+* text=auto eol=lf
 *.sh text eol=lf
-bin/keenetic-maxprobe text eol=lf
-scripts/install.sh text eol=lf
-collectors/py/**/*.py text eol=lf
+*.py text eol=lf
+*.md text eol=lf

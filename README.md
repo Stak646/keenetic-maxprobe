@@ -1,71 +1,61 @@
 # keenetic-maxprobe
 
-Максимально «жадный» инструмент диагностики и исследования **KeeneticOS + Entware (OPKG)**.
+Скрипт для максимального сбора диагностических данных с роутеров **KeeneticOS** (и **Entware/OPKG**, если установлен) с упаковкой в архив `.tar.gz` и автоматическим формированием отчёта.
 
-Цели:
-- собрать максимум технической информации (файлы конфигов, хуки, сервисы, API/RCI, процессы, сеть, маршрутизация);
-- сформировать **архив‑слепок** для отладки/бэкапа (в т.ч. для будущего Telegram‑бота);
-- выдать **очень подробный лог** и отдельный список мест с потенциально чувствительными данными.
+## Быстрый старт
 
-> По умолчанию: **FULL** (в архив попадают конфиги и потенциально секретные данные).  
-> SAFE доступен отдельным флагом.
+Установка (Entware/OPKG):
 
-## Быстрый старт (на роутере)
-
-### Установка (one‑liner)
 ```sh
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/Stak646/keenetic-maxprobe/main/scripts/install.sh)"
 ```
 
-Если нет `curl`:
-```sh
-sh -c "$(wget -qO- https://raw.githubusercontent.com/Stak646/keenetic-maxprobe/main/scripts/install.sh)"
-```
+После установки доступны:
 
-### Запуск (авто‑профиль, FULL)
-```sh
-keenetic-maxprobe
-```
+- `keenetic-maxprobe` — основной сборщик
+- `entwarectl` — небольшой помощник по Entware (опционально)
+- Web UI: поднимается сервисом после установки (см. ниже)
 
-### Мастер настройки (опционально)
-```sh
-keenetic-maxprobe --init
-```
+## Web UI
 
-### Максимально глубокий снимок (без ограничений по чувствительным данным)
-```sh
-keenetic-maxprobe --mode extream
-```
+После установки инсталлер:
 
-### SAFE (минимизация секретов в зеркале)
-```sh
-keenetic-maxprobe --mode safe
-```
+1) ставит `python3` (если возможно),
+2) пишет конфиг `/opt/etc/keenetic-maxprobe.conf`,
+3) ставит init-скрипт `/opt/etc/init.d/S99keenetic-maxprobe-webui`,
+4) запускает Web UI.
 
+Открывайте:
 
-### Web UI
-```sh
-keenetic-maxprobe --web
-```
+- `http://<IP_роутера>:8088/?token=<TOKEN>`
 
-По умолчанию Web UI слушает `127.0.0.1:8088`. Чтобы открыть из LAN:
-```sh
-keenetic-maxprobe --web --web-bind 0.0.0.0 --web-port 8088
-```
+Токен хранится в конфиге (`WEB_TOKEN`) и обязателен для API.
 
-### Важно про вывод (v0.7.0+)
-Начиная с **v0.7.0** все файлы/архив создаются в **`/var/tmp`**, а `/var/tmp` исключён из копирования/исследования, чтобы исключить баги с самосканированием и «раздуванием» отчётов.
+## Ключевые флаги
 
+- `--mode full|safe|extream`
+- `--profile auto|forensic|diagnostic|lite`
+- `--collectors all|shonly|shpy|custom`
+- `--outbase-policy auto|ram|entware`
+- `--outbase <DIR>` — принудительно выбрать каталог вывода (если нужен USB/внутренняя память вместо RAM)
+- `--web` — запустить Web UI вручную
 
-## Где смотреть результат
-См. `docs/OUTPUT_FORMAT.md`.
+## Важно про Entware (/opt) и хранилище
+
+Entware всегда монтируется в `/opt`, но физически может быть:
+
+- **USB флешка / HDD** (часто `/dev/sdX`)
+- **внутренняя память** (часто `ubifs`, `ubi*`, `/storage*`)
+
+`keenetic-maxprobe` сохраняет это в `meta/opkg_storage_hint.txt` и отражает в отчёте.
 
 ## Документация
-- RU: `docs/README_RU.md`
-- EN: `docs/README_EN.md`
-- Формат отчёта: `docs/OUTPUT_FORMAT.md`
-- Security / sensitive: `docs/SECURITY.md`
-- Git cleanup: `docs/GIT_CLEANUP.md`
+
+- `docs/README_RU.md`
+- `docs/README_EN.md`
+- `docs/OUTPUT_FORMAT.md`
+- `docs/SECURITY.md`
 
 ## Лицензия
-MIT, см. `LICENSE`.
+
+MIT (см. `LICENSE`).

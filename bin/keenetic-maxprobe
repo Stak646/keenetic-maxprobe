@@ -1,72 +1,62 @@
 #!/bin/sh
 # keenetic-maxprobe — maximal KeeneticOS + Entware probe
-# Repo: https://github.com/Stak646/keenetic-maxprobe
-# License: MIT
+# Version: 0.7.2
 #
-# Output policy:
-#   - All outputs go to /var/tmp (fallback to /tmp only if /var/tmp is not writable)
-#   - /var/tmp is always excluded from filesystem mirror and scanning (prevents self-recursion)
-#
-# Notes:
-#   - "extream" mode (spelling preserved for compatibility) collects the most and allows sensitive data.
-#   - "safe" mode tries to redact some secrets in the filesystem mirror (keeps file presence).
+# Fixes:
+#  - i18n function renamed from "tr" -> "T" (was breaking command "tr" everywhere)
+#  - wizard y/n prompt no longer loops infinitely (CRLF/whitespace normalized)
+#  - all output ALWAYS under /var/tmp (policy), and /var/tmp is excluded from scanning/mirroring
+#  - WORK/meta is created BEFORE metrics/spinner start (no "nonexistent directory")
+#  - self-copy protection: excludes $WORK and /var/tmp from any filesystem mirroring
 
 set -u
+umask 077
+PATH="/opt/bin:/opt/sbin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-VERSION="0.7.1"
+VERSION="0.7.2"
 PROG="keenetic-maxprobe"
 
-# Prefer Entware first
-PATH="/opt/bin:/opt/sbin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-umask 077
+LANG_UI="${LANG_UI:-ru}"      # ru|en
+PROFILE="${PROFILE:-auto}"    # auto|forensic|diagnostic|lite
+MODE="${MODE:-full}"          # full|safe|extream
+COLLECTORS="${COLLECTORS:-all}"     # all|shonly|shpy|custom
+CUSTOM_COLLECTORS="${CUSTOM_COLLECTORS:-}"  # comma list for custom: py,go,lua,node,perl,ruby
 
-# ---------------- defaults (may be overridden by config/CLI) ----------------
-LANG_UI="ru"                 # ru|en
-PROFILE="auto"               # auto|forensic|diagnostic|lite
-MODE="full"                  # full|safe|extream
-COLLECTORS="all"             # all|shonly|shpy|custom
-CUSTOM_COLLECTORS=""         # comma list for custom: py,go,lua,node,perl,ruby
-OUTDIR=""                    # ignored by policy; kept for backwards compat
-CLEAN_OLD=0
-CLEAN_TMP=0
-DEBUG=1
-SPINNER=1
-YES=0
+OUTBASE_POLICY="/var/tmp"     # fixed by policy
+OUTDIR=""                     # ignored by policy (backward compat)
 
-# Dependencies
-NO_INSTALL=0                 # 1 => do not install anything via opkg
-DEPS_MODE="cleanup"          # cleanup|keep
-DEPS_LEVEL="core"            # core|collectors
+CLEAN_OLD="${CLEAN_OLD:-0}"
+CLEAN_TMP="${CLEAN_TMP:-0}"
+DEBUG="${DEBUG:-1}"
+SPINNER="${SPINNER:-1}"
+YES="${YES:-0}"
 
-# Resource limits (best-effort)
-MAX_CPU=85                   # 0..100
-MAX_MEM=95                   # 0..100
+NO_INSTALL="${NO_INSTALL:-0}"
+DEPS_MODE="${DEPS_MODE:-cleanup}"     # cleanup|keep
+DEPS_LEVEL="${DEPS_LEVEL:-core}"      # core|collectors
+INSTALLED_TOP_PKGS=""
 
-# Parallelism for optional collectors
-JOBS="auto"                  # auto|N
+MAX_CPU="${MAX_CPU:-85}"
+MAX_MEM="${MAX_MEM:-95}"
+JOBS="${JOBS:-auto}"
 
-# Init wizard
 INIT=0
 
-# Web UI (optional)
 WEB=0
-WEB_BIND="127.0.0.1"
-WEB_PORT="8088"
+WEB_BIND="${WEB_BIND:-127.0.0.1}"
+WEB_PORT="${WEB_PORT:-8088}"
 
 CONFIG_PATH="/opt/etc/keenetic-maxprobe.conf"
 SHARE_DIR="/opt/share/keenetic-maxprobe"
 COLLECTORS_DIR="$SHARE_DIR/collectors"
 
-# Allow running directly from git repo without install.sh
 if [ ! -d "$COLLECTORS_DIR" ]; then
-  _sd="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd 2>/dev/null || echo "")"
-  if [ -n "$_sd" ] && [ -d "$_sd/../collectors" ]; then
+  _sd="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd 2>/dev/null || true)"
+  if [ -n "${_sd:-}" ] && [ -d "$_sd/../collectors" ]; then
     COLLECTORS_DIR="$_sd/../collectors"
   fi
 fi
 
-# ---------------- runtime globals ----------------
-OUTBASE=""
 BASE=""
 WORK=""
 ARCHIVE=""
@@ -74,85 +64,78 @@ RUNLOG=""
 ERRLOG=""
 PHASE_FILE=""
 PROGRESS_FILE=""
-METRICS_CUR=""
 METRICS_TSV=""
+METRICS_CUR=""
 METRICS_PID=""
 SPINNER_PID=""
-START_EPOCH=""
 TOTAL_STEPS=0
 STEP_NO=0
-JOBS_N=1
 
-# ---------------- tiny i18n ----------------
-tr() {
+KEEP_WORK="${KMP_KEEP_WORK:-0}" # KMP_KEEP_WORK=1 to keep workdir
+
+T() {
   key="$1"
   case "${LANG_UI:-ru}" in
     en)
       case "$key" in
         WIZ_TITLE) echo "== keenetic-maxprobe init wizard ==" ;;
-        WIZ_LANG) echo "UI language (ru/en)" ;;
-        WIZ_PROFILE) echo "Profile (auto/forensic/diagnostic/lite)" ;;
-        WIZ_PROFILE_HELP) echo "auto=smart; forensic=max; diagnostic=balanced; lite=minimal" ;;
-        WIZ_MODE) echo "Mode (full/safe/extream)" ;;
-        WIZ_MODE_HELP) echo "full=max data; safe=redact some; extream=deepest, no safety limits" ;;
-        WIZ_COLLECTORS) echo "Collectors (all/shonly/shpy/custom)" ;;
+        WIZ_LANG) echo "UI language: ru/en" ;;
+        WIZ_PROFILE) echo "Profile: auto/forensic/diagnostic/lite" ;;
+        WIZ_PROFILE_HELP) echo "auto=smart; forensic=max; diagnostic=balanced; lite=min" ;;
+        WIZ_MODE) echo "Mode: full/safe/extream" ;;
+        WIZ_MODE_HELP) echo "full=max data; safe=redaction guide; extream=deepest, no safety limits" ;;
+        WIZ_COLLECTORS) echo "Collectors: all/shonly/shpy/custom" ;;
         WIZ_COLLECTORS_HELP) echo "all=all available; shonly=shell only; shpy=shell+python; custom=list" ;;
         WIZ_CUSTOM) echo "Custom collectors (comma list: py,go,lua,node,perl,ruby)" ;;
-        WIZ_OUTDIR_FIXED) echo "Output directory is fixed:" ;;
-        WIZ_CLEAN_OLD) echo "Remove old keenetic-maxprobe-* archives/workdirs in /var/tmp?" ;;
-        WIZ_CLEAN_TMP) echo "Clean /tmp before run? (removes /tmp/keenetic-maxprobe-*)" ;;
+        WIZ_OUTDIR_FIXED) echo "Output directory is fixed by policy:" ;;
+        WIZ_CLEAN_OLD) echo "Clean old keenetic-maxprobe-* archives in output directory?" ;;
+        WIZ_CLEAN_TMP) echo "Clean /tmp before run? (may help if low space)" ;;
         WIZ_DEBUG) echo "Enable debug? (more logs, longer run)" ;;
-        WIZ_DEPS_CLEANUP) echo "Remove packages installed by the tool after run?" ;;
-        WIZ_DEPS_LEVEL) echo "In extream: install missing runtimes for collectors (python/node/...)?" ;;
+        WIZ_DEPS_CLEANUP) echo "Cleanup temporarily installed packages after run?" ;;
+        WIZ_DEPS_LEVEL) echo "Install missing collector runtimes (python/node/...) in extream mode?" ;;
         WIZ_SPINNER) echo "Show spinner/progress animation?" ;;
-        WIZ_JOBS) echo "Collector parallel jobs (auto/1/2/...)" ;;
-        WIZ_LIMITS_CPU) echo "Max CPU% (0-100)" ;;
-        WIZ_LIMITS_RAM) echo "Max RAM% (0-100)" ;;
+        WIZ_JOBS) echo "Parallel collectors jobs (auto/1/2/...)" ;;
+        WIZ_LIMITS_CPU) echo "CPU limit (%)" ;;
+        WIZ_LIMITS_MEM) echo "RAM limit (%)" ;;
         SAVED) echo "[+] Saved:" ;;
         STARTING) echo "[+] Starting probe" ;;
         DONE) echo "[+] Done. Archive:" ;;
-        WARN_SPACE) echo "[!] Low free space in output dir; consider --clean-old or freeing space" ;;
-        WEB_NEEDS_PY) echo "Web UI requires python3 (Entware)." ;;
         *) echo "$key" ;;
       esac
       ;;
     *)
       case "$key" in
         WIZ_TITLE) echo "== мастер настройки keenetic-maxprobe ==" ;;
-        WIZ_LANG) echo "Язык интерфейса (ru/en)" ;;
-        WIZ_PROFILE) echo "Профиль (auto/forensic/diagnostic/lite)" ;;
+        WIZ_LANG) echo "Язык интерфейса: ru/en" ;;
+        WIZ_PROFILE) echo "Профиль: auto/forensic/diagnostic/lite" ;;
         WIZ_PROFILE_HELP) echo "auto=умно; forensic=максимум; diagnostic=баланс; lite=минимум" ;;
-        WIZ_MODE) echo "Режим (full/safe/extream)" ;;
-        WIZ_MODE_HELP) echo "full=максимум; safe=частичная защита; extream=самый полный, без ограничений" ;;
-        WIZ_COLLECTORS) echo "Collectors (all/shonly/shpy/custom)" ;;
+        WIZ_MODE) echo "Режим: full/safe/extream" ;;
+        WIZ_MODE_HELP) echo "full=максимум; safe=гид по скрытию; extream=максимум без ограничений" ;;
+        WIZ_COLLECTORS) echo "Collectors: all/shonly/shpy/custom" ;;
         WIZ_COLLECTORS_HELP) echo "all=все доступные; shonly=только shell; shpy=shell+python; custom=список" ;;
         WIZ_CUSTOM) echo "Список collectors (через запятую: py,go,lua,node,perl,ruby)" ;;
-        WIZ_OUTDIR_FIXED) echo "Папка вывода зафиксирована:" ;;
-        WIZ_CLEAN_OLD) echo "Удалить старые keenetic-maxprobe-* архивы/папки из /var/tmp?" ;;
-        WIZ_CLEAN_TMP) echo "Очистить /tmp перед запуском? (удалит /tmp/keenetic-maxprobe-*)" ;;
+        WIZ_OUTDIR_FIXED) echo "Папка вывода зафиксирована политикой:" ;;
+        WIZ_CLEAN_OLD) echo "Удалить старые keenetic-maxprobe-* архивы в папке вывода?" ;;
+        WIZ_CLEAN_TMP) echo "Очистить /tmp перед запуском? (помогает при нехватке места)" ;;
         WIZ_DEBUG) echo "Включить debug? (больше логов, дольше)" ;;
-        WIZ_DEPS_CLEANUP) echo "Удалять пакеты, которые инструмент установил во время запуска?" ;;
-        WIZ_DEPS_LEVEL) echo "В extream ставить runtimes collectors (python/node/...)? (медленно, но больше данных)" ;;
+        WIZ_DEPS_CLEANUP) echo "Удалять временно установленные пакеты после запуска?" ;;
+        WIZ_DEPS_LEVEL) echo "Ставить отсутствующие runtimes collectors (python/node/...) в extream?" ;;
         WIZ_SPINNER) echo "Показывать анимацию прогресса?" ;;
         WIZ_JOBS) echo "Параллельность collectors (auto/1/2/...)" ;;
-        WIZ_LIMITS_CPU) echo "Лимит CPU% (0-100)" ;;
-        WIZ_LIMITS_RAM) echo "Лимит RAM% (0-100)" ;;
+        WIZ_LIMITS_CPU) echo "Лимит CPU (%)" ;;
+        WIZ_LIMITS_MEM) echo "Лимит RAM (%)" ;;
         SAVED) echo "[+] Сохранено:" ;;
         STARTING) echo "[+] Старт диагностики" ;;
         DONE) echo "[+] Готово. Архив:" ;;
-        WARN_SPACE) echo "[!] Мало свободного места в папке вывода; удалите старые архивы или освободите место" ;;
-        WEB_NEEDS_PY) echo "Web UI требует python3 (Entware)." ;;
         *) echo "$key" ;;
       esac
       ;;
   esac
 }
 
-# ---------------- helpers ----------------
+have() { command -v "$1" >/dev/null 2>&1; }
 now_utc() { date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ'; }
 ts_utc_path() { date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || date '+%Y%m%dT%H%M%SZ'; }
-have() { command -v "$1" >/dev/null 2>&1; }
-sanitize_name() { printf '%s' "$1" | sed 's/[^A-Za-z0-9._-]/_/g'; }
 
 ensure_dir() {
   d="$1"
@@ -166,91 +149,81 @@ say() {
   msg="$*"
   ts="$(now_utc)"
   printf '%s %s\n' "$ts" "$msg" >&2
-  if [ -n "${RUNLOG:-}" ]; then
-    printf '%s %s\n' "$ts" "$msg" >>"$RUNLOG" 2>/dev/null || true
-  fi
+  [ -n "${RUNLOG:-}" ] && printf '%s %s\n' "$ts" "$msg" >>"$RUNLOG" 2>/dev/null || true
 }
 
 warn() {
   msg="$*"
   ts="$(now_utc)"
   printf '%s [!] %s\n' "$ts" "$msg" >&2
-  if [ -n "${ERRLOG:-}" ]; then
-    printf '%s [!] %s\n' "$ts" "$msg" >>"$ERRLOG" 2>/dev/null || true
-  fi
+  [ -n "${ERRLOG:-}" ] && printf '%s [!] %s\n' "$ts" "$msg" >>"$ERRLOG" 2>/dev/null || true
 }
 
 die() { warn "$*"; exit 1; }
 
+strip_ws() {
+  printf '%s' "${1:-}" | command tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+lower_first() {
+  s="$(strip_ws "${1:-}")"
+  s="$(printf '%s' "$s" | command tr '[:upper:]' '[:lower:]')"
+  printf '%s' "$s" | cut -c1
+}
+
 set_phase() {
-  [ -n "${PHASE_FILE:-}" ] || return 0
-  printf '%s\n' "$1" >"$PHASE_FILE" 2>/dev/null || true
+  [ -n "${WORK:-}" ] || return 0
+  [ -d "$WORK/meta" ] || return 0
+  printf '%s\n' "$*" >"$PHASE_FILE" 2>/dev/null || true
 }
 
 set_progress() {
-  [ -n "${PROGRESS_FILE:-}" ] || return 0
-  printf '%s/%s\n' "$1" "$2" >"$PROGRESS_FILE" 2>/dev/null || true
+  [ -n "${WORK:-}" ] || return 0
+  [ -d "$WORK/meta" ] || return 0
+  printf '%s/%s\n' "$STEP_NO" "$TOTAL_STEPS" >"$PROGRESS_FILE" 2>/dev/null || true
 }
 
-json_escape() {
-  # Escape for JSON string value (very small subset, OK for diagnostics)
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r/\\r/g; s/\n/\\n/g'
-}
-
-run_lowprio() {
-  # Keep router responsive
-  if have ionice; then
-    ionice -c 3 "$@" 2>/dev/null && return 0
-  fi
-  if have nice; then
-    nice -n 10 "$@" 2>/dev/null && return 0
-  fi
-  "$@"
-}
-
-# ---------------- config ----------------
 load_config() {
   [ -f "$CONFIG_PATH" ] || return 0
-  # shellcheck disable=SC1090
   . "$CONFIG_PATH" 2>/dev/null || true
 
-  LANG_UI="${LANG_UI:-ru}"
-  PROFILE="${PROFILE:-auto}"
-  MODE="${MODE:-full}"
-  COLLECTORS="${COLLECTORS:-all}"
-  CUSTOM_COLLECTORS="${CUSTOM_COLLECTORS:-}"
-  CLEAN_OLD="${CLEAN_OLD:-0}"
-  CLEAN_TMP="${CLEAN_TMP:-0}"
-  DEBUG="${DEBUG:-1}"
-  SPINNER="${SPINNER:-1}"
-  NO_INSTALL="${NO_INSTALL:-0}"
-  DEPS_MODE="${DEPS_MODE:-cleanup}"
-  DEPS_LEVEL="${DEPS_LEVEL:-core}"
-  MAX_CPU="${MAX_CPU:-85}"
-  MAX_MEM="${MAX_MEM:-95}"
-  JOBS="${JOBS:-auto}"
+  LANG_UI="$(strip_ws "${LANG_UI:-ru}")"
+  PROFILE="$(strip_ws "${PROFILE:-auto}")"
+  MODE="$(strip_ws "${MODE:-full}")"
+  COLLECTORS="$(strip_ws "${COLLECTORS:-all}")"
+  CUSTOM_COLLECTORS="$(strip_ws "${CUSTOM_COLLECTORS:-}")"
+  CLEAN_OLD="$(strip_ws "${CLEAN_OLD:-0}")"
+  CLEAN_TMP="$(strip_ws "${CLEAN_TMP:-0}")"
+  DEBUG="$(strip_ws "${DEBUG:-1}")"
+  SPINNER="$(strip_ws "${SPINNER:-1}")"
+  NO_INSTALL="$(strip_ws "${NO_INSTALL:-0}")"
+  DEPS_MODE="$(strip_ws "${DEPS_MODE:-cleanup}")"
+  DEPS_LEVEL="$(strip_ws "${DEPS_LEVEL:-core}")"
+  MAX_CPU="$(strip_ws "${MAX_CPU:-85}")"
+  MAX_MEM="$(strip_ws "${MAX_MEM:-95}")"
+  JOBS="$(strip_ws "${JOBS:-auto}")"
 }
 
 save_config() {
   ensure_dir "$(dirname "$CONFIG_PATH")" || true
   cat >"$CONFIG_PATH" <<EOF
-# keenetic-maxprobe config (shell)
-LANG_UI="${LANG_UI}"
-PROFILE="${PROFILE}"
-MODE="${MODE}"
-COLLECTORS="${COLLECTORS}"
-CUSTOM_COLLECTORS="${CUSTOM_COLLECTORS}"
-CLEAN_OLD="${CLEAN_OLD}"
-CLEAN_TMP="${CLEAN_TMP}"
-DEBUG="${DEBUG}"
-SPINNER="${SPINNER}"
-YES="${YES}"
-NO_INSTALL="${NO_INSTALL}"
-DEPS_MODE="${DEPS_MODE}"
-DEPS_LEVEL="${DEPS_LEVEL}"
-MAX_CPU="${MAX_CPU}"
-MAX_MEM="${MAX_MEM}"
-JOBS="${JOBS}"
+# keenetic-maxprobe configuration
+LANG_UI=$LANG_UI
+PROFILE=$PROFILE
+MODE=$MODE
+COLLECTORS=$COLLECTORS
+CUSTOM_COLLECTORS=$CUSTOM_COLLECTORS
+# output is always /var/tmp (policy)
+CLEAN_OLD=$CLEAN_OLD
+CLEAN_TMP=$CLEAN_TMP
+DEBUG=$DEBUG
+SPINNER=$SPINNER
+NO_INSTALL=$NO_INSTALL
+DEPS_MODE=$DEPS_MODE
+DEPS_LEVEL=$DEPS_LEVEL
+MAX_CPU=$MAX_CPU
+MAX_MEM=$MAX_MEM
+JOBS=$JOBS
 EOF
 }
 
@@ -263,169 +236,100 @@ ask() {
   fi
   printf '%s [%s]: ' "$prompt" "$def" >&2
   IFS= read -r ans || ans=""
-  ans="$(printf '%s' "$ans" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  ans="$(strip_ws "$ans")"
   [ -n "$ans" ] || ans="$def"
   printf '%s' "$ans"
 }
 
 ask_yn() {
   prompt="$1"
-  def="$2" # y/n
+  def="$2"  # y|n
   if [ "$YES" -eq 1 ]; then
     [ "$def" = "y" ] && return 0 || return 1
   fi
   while :; do
     ans="$(ask "$prompt (y/n)" "$def")"
-    ans="$(printf '%s' "$ans" | tr -d '\r' | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    case "$ans" in
-      y|yes) return 0 ;;
-      n|no) return 1 ;;
+    a="$(lower_first "$ans")"
+    case "$a" in
+      y) return 0 ;;
+      n) return 1 ;;
     esac
   done
 }
 
-init_wizard() {
-  echo >&2
-  echo "$(tr WIZ_TITLE)" >&2
-  echo >&2
-
-  lang="$(ask "$(tr WIZ_LANG)" "$LANG_UI")"
-  case "$lang" in ru|en) LANG_UI="$lang" ;; esac
-
-  echo >&2
-  echo "$(tr WIZ_PROFILE_HELP)" >&2
-  p="$(ask "$(tr WIZ_PROFILE)" "$PROFILE")"
-  case "$p" in auto|forensic|diagnostic|lite) PROFILE="$p" ;; esac
-
-  echo >&2
-  echo "$(tr WIZ_MODE_HELP)" >&2
-  m="$(ask "$(tr WIZ_MODE)" "$MODE")"
-  case "$m" in full|safe|extream) MODE="$m" ;; esac
-
-  echo >&2
-  echo "$(tr WIZ_COLLECTORS_HELP)" >&2
-  c="$(ask "$(tr WIZ_COLLECTORS)" "$COLLECTORS")"
-  case "$c" in all|shonly|shpy|custom) COLLECTORS="$c" ;; esac
-  if [ "$COLLECTORS" = "custom" ]; then
-    CUSTOM_COLLECTORS="$(ask "$(tr WIZ_CUSTOM)" "$CUSTOM_COLLECTORS")"
-  fi
-
-  echo >&2
-  echo "$(tr WIZ_OUTDIR_FIXED) /var/tmp" >&2
-
-  if ask_yn "$(tr WIZ_CLEAN_OLD)" "n"; then CLEAN_OLD=1; else CLEAN_OLD=0; fi
-  if ask_yn "$(tr WIZ_CLEAN_TMP)" "n"; then CLEAN_TMP=1; else CLEAN_TMP=0; fi
-  if ask_yn "$(tr WIZ_DEBUG)" "y"; then DEBUG=1; else DEBUG=0; fi
-  if ask_yn "$(tr WIZ_DEPS_CLEANUP)" "y"; then DEPS_MODE="cleanup"; else DEPS_MODE="keep"; fi
-  if ask_yn "$(tr WIZ_SPINNER)" "y"; then SPINNER=1; else SPINNER=0; fi
-
-  JOBS="$(ask "$(tr WIZ_JOBS)" "$JOBS")"
-  MAX_CPU="$(ask "$(tr WIZ_LIMITS_CPU)" "$MAX_CPU")"
-  MAX_MEM="$(ask "$(tr WIZ_LIMITS_RAM)" "$MAX_MEM")"
-
-  if [ "$MODE" = "extream" ]; then
-    if ask_yn "$(tr WIZ_DEPS_LEVEL)" "n"; then DEPS_LEVEL="collectors"; else DEPS_LEVEL="core"; fi
-  fi
-
-  save_config
-  echo >&2
-  echo "$(tr SAVED) $CONFIG_PATH" >&2
-}
-
 usage() {
-  cat >&2 <<'USAGE'
-keenetic-maxprobe [options]
-
-Output policy:
-  - All files are stored in /var/tmp
-  - /var/tmp is excluded from scanning/mirroring
+  cat >&2 <<EOF
+$PROG $VERSION
+Policy: all files are stored in /var/tmp; /var/tmp is excluded from scanning/mirroring
 
 Core:
-  --init                 interactive wizard (saves /opt/etc/keenetic-maxprobe.conf)
-  --lang {ru|en}          UI language for prompts (default: ru)
-  --mode {full|safe|extream}
-  --extream | --extreme   shortcut for --mode extream
-  --profile {auto|forensic|diagnostic|lite}
-  --collectors {all|shonly|shpy|custom}
-  --custom-collectors     comma list: py,go,lua,node,perl,ruby
-  --clean-old             remove old keenetic-maxprobe-* in /var/tmp
-  --clean-tmp             remove /tmp/keenetic-maxprobe-* before run
+  --init                  interactive wizard (saves $CONFIG_PATH)
+  --lang ru|en
+  --profile auto|forensic|diagnostic|lite
+  --mode full|safe|extream   (alias: --extream / --extreme)
+  --collectors all|shonly|shpy|custom
+  --custom-collectors py,go,lua,node,perl,ruby
+  --clean-old              remove old keenetic-maxprobe-*.tar.gz in /var/tmp
+  --clean-tmp              remove /tmp/keenetic-maxprobe-* before run
+  --web                    start Web UI (requires python3)
+  --web-bind IP            default 127.0.0.1
+  --web-port PORT          default 8088
 
-Web UI (optional, requires python3):
-  --web
-  --web-bind <addr>       default: 127.0.0.1
-  --web-port <port>       default: 8088
+Perf (best-effort):
+  --max-cpu N              default 85
+  --max-mem N              default 95
+  --jobs auto|N
 
-Debug / UX:
-  --debug | --no-debug
-  --spinner | --no-spinner
-  -y, --yes               non-interactive (defaults)
+Deps:
+  --no-install
+  --deps-mode cleanup|keep
+  --deps-level core|collectors
 
-Dependencies:
-  --no-install            do not install anything via opkg
-  --deps-mode {cleanup|keep}
-  --deps-level {core|collectors}
-
-Performance:
-  --max-cpu <pct>         default 85
-  --max-mem <pct>         default 95
-  --jobs {auto|N}         parallel jobs for independent collectors
-
-Examples:
-  keenetic-maxprobe
-  keenetic-maxprobe --mode safe
-  keenetic-maxprobe --mode extream --deps-level collectors
-  keenetic-maxprobe --web --web-bind 0.0.0.0 --web-port 8088
-USAGE
+Debug:
+  --debug / --no-debug
+  --spinner / --no-spinner
+  -y, --yes
+EOF
 }
 
-# ---------------- arg parsing ----------------
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --init) INIT=1 ;;
       --lang) LANG_UI="${2:-ru}"; shift ;;
+      --profile) PROFILE="${2:-auto}"; shift ;;
       --mode) MODE="${2:-full}"; shift ;;
       --extream|--extreme) MODE="extream" ;;
-      --profile) PROFILE="${2:-auto}"; shift ;;
       --collectors) COLLECTORS="${2:-all}"; shift ;;
       --custom-collectors) CUSTOM_COLLECTORS="${2:-}"; COLLECTORS="custom"; shift ;;
-      --outdir) OUTDIR="${2:-}"; shift ;; # ignored (kept for compat)
       --clean-old) CLEAN_OLD=1 ;;
       --clean-tmp) CLEAN_TMP=1 ;;
       --debug) DEBUG=1 ;;
       --no-debug) DEBUG=0 ;;
       --spinner) SPINNER=1 ;;
       --no-spinner) SPINNER=0 ;;
+      --max-cpu) MAX_CPU="${2:-85}"; shift ;;
+      --max-mem) MAX_MEM="${2:-95}"; shift ;;
+      --jobs) JOBS="${2:-auto}"; shift ;;
       -y|--yes) YES=1 ;;
       --no-install) NO_INSTALL=1 ;;
       --deps-mode) DEPS_MODE="${2:-cleanup}"; shift ;;
       --deps-level) DEPS_LEVEL="${2:-core}"; shift ;;
-      --max-cpu) MAX_CPU="${2:-85}"; shift ;;
-      --max-mem) MAX_MEM="${2:-95}"; shift ;;
-      --jobs) JOBS="${2:-auto}"; shift ;;
       --web) WEB=1 ;;
       --web-bind) WEB_BIND="${2:-127.0.0.1}"; shift ;;
       --web-port) WEB_PORT="${2:-8088}"; shift ;;
       -h|--help) usage; exit 0 ;;
-      *)
-        warn "Unknown arg: $1"
-        usage
-        exit 2
-        ;;
+      *) warn "Unknown arg: $1"; usage; exit 2 ;;
     esac
     shift
   done
-}
 
-# ---------------- resources / metrics ----------------
-get_cores() {
-  c="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1)"
-  [ "$c" -gt 0 ] 2>/dev/null || c=1
-  echo "$c"
+  LANG_UI="$(strip_ws "$LANG_UI")"
+  PROFILE="$(strip_ws "$PROFILE")"
+  MODE="$(strip_ws "$MODE")"
+  COLLECTORS="$(strip_ws "$COLLECTORS")"
+  CUSTOM_COLLECTORS="$(strip_ws "$CUSTOM_COLLECTORS")"
 }
-
-mem_total_kb() { awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0; }
 
 mem_used_pct_now() {
   mt="$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
@@ -439,1094 +343,377 @@ mem_used_pct_now() {
   if [ "$mt" -gt 0 ] 2>/dev/null; then
     used=$((mt - ma))
     pct=$(( (100 * used) / mt ))
-    [ "$pct" -lt 0 ] 2>/dev/null && pct=0
-    [ "$pct" -gt 100 ] 2>/dev/null && pct=100
+    [ "$pct" -lt 0 ] && pct=0
+    [ "$pct" -gt 100 ] && pct=100
     echo "$pct"
   else
-    echo 0
+    echo "0"
   fi
 }
 
-start_metrics() {
-  [ -n "$WORK" ] || return 1
-  ensure_dir "$WORK/meta" || return 1
+cpu_pct_loop() {
+  prev_total=0
+  prev_idle=0
+  while :; do
+    set -- $(awk '/^cpu /{print $2,$3,$4,$5,$6,$7,$8,$9}' /proc/stat 2>/dev/null)
+    u="${1:-0}"; n="${2:-0}"; s="${3:-0}"; i="${4:-0}"; w="${5:-0}"; irq="${6:-0}"; sirq="${7:-0}"; st="${8:-0}"
+    total=$((u+n+s+i+w+irq+sirq+st))
+    idle=$((i+w))
+    if [ "$prev_total" -eq 0 ] 2>/dev/null; then
+      prev_total="$total"; prev_idle="$idle"
+      echo "0"
+    else
+      dt=$((total - prev_total))
+      di=$((idle - prev_idle))
+      prev_total="$total"; prev_idle="$idle"
+      if [ "$dt" -le 0 ] 2>/dev/null; then
+        echo "0"
+      else
+        used=$((dt - di))
+        pct=$(( (100 * used) / dt ))
+        [ "$pct" -lt 0 ] && pct=0
+        [ "$pct" -gt 100 ] && pct=100
+        echo "$pct"
+      fi
+    fi
+    sleep 2
+  done
+}
 
+throttle_if_needed() {
+  c="$(tail -n 1 "$METRICS_CUR" 2>/dev/null | awk -F'\t' '{print $2}' 2>/dev/null)"
+  m="$(tail -n 1 "$METRICS_CUR" 2>/dev/null | awk -F'\t' '{print $3}' 2>/dev/null)"
+  c="${c:-0}"; m="${m:-0}"
+  [ "$c" -ge "$MAX_CPU" ] 2>/dev/null && sleep 1
+  [ "$m" -ge "$MAX_MEM" ] 2>/dev/null && sleep 1
+}
+
+start_metrics() {
+  [ "$DEBUG" -eq 1 ] 2>/dev/null || return 0
   METRICS_TSV="$WORK/meta/metrics.tsv"
   METRICS_CUR="$WORK/meta/metrics_current.tsv"
+  ensure_dir "$WORK/meta" || return 0
 
-  : >"$METRICS_TSV" 2>/dev/null || true
+  printf 'ts_utc\tcpu_pct\tmem_used_pct\tload1\n' >"$METRICS_TSV" 2>/dev/null || true
   : >"$METRICS_CUR" 2>/dev/null || true
-  printf 'ts_utc\tcpu_pct\tmem_used_pct\tmem_avail_kb\tload1\n' >>"$METRICS_TSV" 2>/dev/null || true
 
   (
-    prev_total=0
-    prev_idle=0
-    while :; do
-      # stop if workdir disappeared (e.g. cleanup)
-      [ -d "$WORK/meta" ] || exit 0
-
+    cpu_pct_loop | while IFS= read -r cpu; do
       ts="$(now_utc)"
-
-      # CPU from /proc/stat (aggregate, 0..100)
-      set -- $(awk 'NR==1{print $2,$3,$4,$5,$6,$7,$8,$9}' /proc/stat 2>/dev/null)
-      u=${1:-0}; n=${2:-0}; s=${3:-0}; i=${4:-0}; w=${5:-0}; irq=${6:-0}; sirq=${7:-0}; st=${8:-0}
-      total=$((u + n + s + i + w + irq + sirq + st))
-      idle=$((i + w))
-      dt=$((total - prev_total))
-      didle=$((idle - prev_idle))
-      prev_total=$total
-      prev_idle=$idle
-      cpu=0
-      if [ "$dt" -gt 0 ] 2>/dev/null; then
-        busy=$((dt - didle))
-        [ "$busy" -lt 0 ] 2>/dev/null && busy=0
-        cpu=$((busy * 100 / dt))
-        [ "$cpu" -lt 0 ] 2>/dev/null && cpu=0
-        [ "$cpu" -gt 100 ] 2>/dev/null && cpu=100
-      fi
-
-      mem_pct="$(mem_used_pct_now)"
-      mem_avail="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+      mem="$(mem_used_pct_now)"
       load1="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
-
-      printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$cpu" "$mem_pct" "$mem_avail" "$load1" >>"$METRICS_TSV" 2>/dev/null || true
-      printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$cpu" "$mem_pct" "$mem_avail" "$load1" >"$METRICS_CUR" 2>/dev/null || true
-
-      sleep 1
+      printf '%s\t%s\t%s\t%s\n' "$ts" "$cpu" "$mem" "$load1" >>"$METRICS_TSV" 2>/dev/null || true
+      printf '%s\t%s\t%s\t%s\n' "$ts" "$cpu" "$mem" "$load1" >"$METRICS_CUR" 2>/dev/null || true
     done
   ) &
-  METRICS_PID=$!
+  METRICS_PID="$!"
 }
 
 stop_metrics() {
   [ -n "${METRICS_PID:-}" ] || return 0
   kill "$METRICS_PID" 2>/dev/null || true
-  wait "$METRICS_PID" 2>/dev/null || true
-}
-
-metrics_get_cpu() {
-  [ -f "$METRICS_CUR" ] || { echo 0; return 0; }
-  awk -F'\t' 'NF>=2{v=$2} END{print v+0}' "$METRICS_CUR" 2>/dev/null
-}
-metrics_get_mem() {
-  [ -f "$METRICS_CUR" ] || { echo 0; return 0; }
-  awk -F'\t' 'NF>=3{v=$3} END{print v+0}' "$METRICS_CUR" 2>/dev/null
-}
-metrics_get_load1() {
-  [ -f "$METRICS_CUR" ] || { echo 0; return 0; }
-  awk -F'\t' 'NF>=5{v=$5} END{print v+0}' "$METRICS_CUR" 2>/dev/null
-}
-
-wait_for_resources() {
-  # best-effort throttling; if metrics not running, do nothing
-  [ -f "${METRICS_CUR:-/dev/null}" ] || return 0
-  while :; do
-    cpu="$(metrics_get_cpu 2>/dev/null || echo 0)"
-    mem="$(metrics_get_mem 2>/dev/null || echo 0)"
-    [ -n "$cpu" ] || cpu=0
-    [ -n "$mem" ] || mem=0
-    if [ "$cpu" -le "$MAX_CPU" ] 2>/dev/null && [ "$mem" -le "$MAX_MEM" ] 2>/dev/null; then
-      return 0
-    fi
-    warn "Throttling: CPU~${cpu}% (limit ${MAX_CPU}%), MEM~${mem}% (limit ${MAX_MEM}%). Sleeping..."
-    sleep 2
-  done
+  METRICS_PID=""
 }
 
 start_spinner() {
-  [ "$SPINNER" -eq 1 ] || return 0
-  [ -n "$WORK" ] || return 0
+  [ "$SPINNER" -eq 1 ] 2>/dev/null || return 0
   (
     i=0
+    chars='|/-\\'
     while :; do
-      case $((i % 4)) in
-        0) ch="/" ;;
-        1) ch="-" ;;
-        2) ch="\\\\" ;;
-        3) ch="|" ;;
-      esac
-
-      phase="..."
-      prog="0/0"
-      [ -f "$PHASE_FILE" ] && phase="$(head -n 1 "$PHASE_FILE" 2>/dev/null || echo "...")"
-      [ -f "$PROGRESS_FILE" ] && prog="$(head -n 1 "$PROGRESS_FILE" 2>/dev/null || echo "0/0")"
-
-      cpu="$(metrics_get_cpu 2>/dev/null || echo 0)"
-      mem="$(metrics_get_mem 2>/dev/null || echo 0)"
-      load1="$(metrics_get_load1 2>/dev/null || echo 0)"
-
-      printf '\r[%s] %s | %s | CPU~%s%% MEM~%s%% L1:%s ' "$ch" "$prog" "$phase" "$cpu" "$mem" "$load1" >&2
-
-      i=$((i + 1))
+      i=$(( (i+1) % 4 ))
+      ch="$(printf '%s' "$chars" | cut -c $((i+1)))"
+      ph="$(cat "$PHASE_FILE" 2>/dev/null | head -n1)"
+      pr="$(cat "$PROGRESS_FILE" 2>/dev/null | head -n1)"
+      cur="$(cat "$METRICS_CUR" 2>/dev/null | tail -n1)"
+      cpu="$(printf '%s' "$cur" | awk -F'\t' '{print $2}' 2>/dev/null)"
+      mem="$(printf '%s' "$cur" | awk -F'\t' '{print $3}' 2>/dev/null)"
+      load1="$(printf '%s' "$cur" | awk -F'\t' '{print $4}' 2>/dev/null)"
+      [ -n "$cpu" ] && cpu="CPU~${cpu}%"
+      [ -n "$mem" ] && mem="RAM~${mem}%"
+      [ -n "$load1" ] && load1="L1~${load1}"
+      printf '\r[%s] %s %s %s %s %s  ' "$ch" "$pr" "$ph" "$cpu" "$mem" "$load1" >&2
       sleep 1
     done
   ) &
-  SPINNER_PID=$!
+  SPINNER_PID="$!"
 }
 
 stop_spinner() {
   [ -n "${SPINNER_PID:-}" ] || return 0
   kill "$SPINNER_PID" 2>/dev/null || true
-  wait "$SPINNER_PID" 2>/dev/null || true
+  SPINNER_PID=""
   printf '\n' >&2
 }
 
-# ---------------- dependency helpers ----------------
-opkg_snapshot() {
-  out="$1"
-  if have opkg; then
-    opkg list-installed 2>/dev/null | awk '{print $1}' | sort -u >"$out" 2>/dev/null || true
-  else
-    : >"$out" 2>/dev/null || true
-  fi
-}
+opkg_have_pkg() { opkg status "$1" >/dev/null 2>&1; }
 
-opkg_update_once() {
-  [ "$NO_INSTALL" -eq 0 ] || return 1
-  have opkg || return 1
-  if [ -n "${RUNLOG:-}" ]; then
-    opkg update >>"$RUNLOG" 2>>"$ERRLOG" || true
-  else
-    opkg update >/dev/null 2>&1 || true
-  fi
-  return 0
-}
-
-opkg_install_pkg() {
+opkg_install_top() {
   pkg="$1"
-  [ "$NO_INSTALL" -eq 0 ] || return 1
-  have opkg || return 1
-  say "[+] opkg install $pkg"
-  if [ -n "${RUNLOG:-}" ]; then
-    opkg install "$pkg" >>"$RUNLOG" 2>>"$ERRLOG" || return 1
-  else
-    opkg install "$pkg" >/dev/null 2>&1 || return 1
+  [ "$NO_INSTALL" -eq 0 ] 2>/dev/null || { warn "NO_INSTALL=1, skip install $pkg"; return 1; }
+  if opkg_have_pkg "$pkg"; then return 0; fi
+  say "opkg install $pkg"
+  if opkg install "$pkg" >/dev/null 2>&1; then
+    INSTALLED_TOP_PKGS="$INSTALLED_TOP_PKGS $pkg"
+    return 0
   fi
-  return 0
-}
-
-ensure_cmd_via_opkg() {
-  # ensure_cmd_via_opkg <cmd> <pkg1> [pkg2...]
-  cmd="$1"
-  shift
-  have "$cmd" && return 0
-  [ "$NO_INSTALL" -eq 0 ] || return 1
-  have opkg || return 1
-  opkg_update_once || true
-  for pkg in "$@"; do
-    opkg_install_pkg "$pkg" && have "$cmd" && return 0
-  done
+  warn "opkg install failed: $pkg"
   return 1
 }
 
-# ---------------- collectors selection ----------------
-collector_enabled() {
-  name="$1"
-  case "$COLLECTORS" in
-    shonly) return 1 ;;
-    shpy) [ "$name" = "py" ] && return 0 || return 1 ;;
-    all) return 0 ;;
-    custom)
-      printf '%s' "$CUSTOM_COLLECTORS" | tr ',' ' ' | grep -w "$name" >/dev/null 2>&1
-      return $?
-      ;;
-    *) return 0 ;;
-  esac
-}
-
-maybe_install_collector_runtimes() {
-  [ "$DEPS_LEVEL" = "collectors" ] || return 0
-  [ "$NO_INSTALL" -eq 0 ] || return 0
+deps_prepare() {
   have opkg || return 0
+  opkg update >/dev/null 2>&1 || true
+  opkg_install_top ca-bundle || true
+  opkg_install_top curl || opkg_install_top wget-ssl || opkg_install_top wget-nossl || true
+  opkg_install_top coreutils || true
+  opkg_install_top findutils || true
+  opkg_install_top procps-ng || true
+  opkg_install_top tar || true
+  opkg_install_top gzip || true
 
-  # IMPORTANT: do not force heavy runtimes unless needed
-  if collector_enabled py && ! have python3; then
-    opkg_update_once || true
-    opkg_install_pkg python3 || true
+  if [ "$MODE" = "extream" ] && [ "$DEPS_LEVEL" = "collectors" ]; then
+    opkg_install_top python3 || opkg_install_top python3-light || true
+    opkg_install_top node || true
+    opkg_install_top lua || true
+    opkg_install_top perl || true
+    opkg_install_top ruby || true
   fi
-  if collector_enabled node && ! have node; then
-    opkg_update_once || true
-    opkg_install_pkg node || true
-  fi
-  if collector_enabled lua && ! have lua; then
-    opkg_update_once || true
-    opkg_install_pkg lua || true
-  fi
-  if collector_enabled perl && ! have perl; then
-    opkg_update_once || true
-    opkg_install_pkg perl || true
-  fi
-  if collector_enabled ruby && ! have ruby; then
-    opkg_update_once || true
-    opkg_install_pkg ruby || true
-  fi
-  # go runtime is very heavy; do not install automatically
-  return 0
 }
 
-cleanup_temp_packages() {
+deps_cleanup() {
+  have opkg || return 0
   [ "$DEPS_MODE" = "cleanup" ] || return 0
-  have opkg || return 0
-  # Compare before/after snapshots
-  before="$WORK/tmp/opkg_before.txt"
-  after="$WORK/tmp/opkg_after.txt"
-  diff="$WORK/tmp/opkg_installed_by_tool.txt"
-  opkg_snapshot "$after"
-  sort -u "$before" 2>/dev/null >"$before.sorted" || true
-  sort -u "$after" 2>/dev/null >"$after.sorted" || true
-  if have comm; then
-    comm -13 "$before.sorted" "$after.sorted" >"$diff" 2>/dev/null || true
-  else
-    # very small fallback: grep
-    : >"$diff" 2>/dev/null || true
-    while IFS= read -r p; do
-      grep -qx "$p" "$before.sorted" 2>/dev/null || printf '%s\n' "$p" >>"$diff" 2>/dev/null || true
-    done <"$after.sorted"
-  fi
-  if [ ! -s "$diff" ]; then
-    say "[+] No new packages to remove."
-    return 0
-  fi
-  say "[+] Removing packages installed by the tool (best-effort). List: $diff"
-  while IFS= read -r pkg; do
-    [ -n "$pkg" ] || continue
-    say "[+] opkg remove $pkg"
-    opkg remove "$pkg" >>"$RUNLOG" 2>>"$ERRLOG" || true
-  done <"$diff"
-}
-
-# ---------------- outdir / cleanup helpers ----------------
-pick_outdir() {
-  if ensure_dir "/var/tmp" && [ -w "/var/tmp" ]; then
-    echo "/var/tmp"
-    return 0
-  fi
-  if ensure_dir "/tmp" && [ -w "/tmp" ]; then
-    warn "/var/tmp is not writable; falling back to /tmp (NOT RECOMMENDED)"
-    echo "/tmp"
-    return 0
-  fi
-  if ensure_dir "/opt/var/tmp" && [ -w "/opt/var/tmp" ]; then
-    warn "/var/tmp and /tmp are not writable; falling back to /opt/var/tmp"
-    echo "/opt/var/tmp"
-    return 0
-  fi
-  return 1
-}
-
-check_free_space_warn() {
-  [ -n "${OUTBASE:-}" ] || return 0
-  have df || return 0
-  kb="$(df -k "$OUTBASE" 2>/dev/null | awk 'NR==2{print $4}' | head -n 1)"
-  [ -n "$kb" ] || return 0
-  if [ "$kb" -lt 51200 ] 2>/dev/null; then
-    warn "$(tr WARN_SPACE)"
-  fi
-}
-
-clean_tmp_dir() {
-  [ "$CLEAN_TMP" -eq 1 ] || return 0
-  rm -rf /tmp/keenetic-maxprobe-*.work /tmp/keenetic-maxprobe-*.tar.gz /tmp/keenetic-maxprobe-*.tar.gz.sha256 2>/dev/null || true
-}
-
-clean_old_outputs() {
-  [ "$CLEAN_OLD" -eq 1 ] || return 0
-  base="${OUTBASE:-/var/tmp}"
-  rm -rf "$base"/keenetic-maxprobe-*.work 2>/dev/null || true
-  rm -f "$base"/keenetic-maxprobe-*.tar.gz "$base"/keenetic-maxprobe-*.tar.gz.sha256 2>/dev/null || true
-}
-
-# ---------------- profile / jobs resolution ----------------
-apply_auto_profile() {
-  cores="$1"
-  mem_kb="$2"
-  [ "$PROFILE" = "auto" ] || return 0
-  if [ "$mem_kb" -lt 196608 ] 2>/dev/null; then
-    PROFILE="lite"
-  elif [ "$mem_kb" -lt 393216 ] 2>/dev/null; then
-    PROFILE="diagnostic"
-  else
-    PROFILE="forensic"
-  fi
-}
-
-jobs_auto() {
-  cores="$1"
-  mem_kb="$2"
-  if [ "$mem_kb" -lt 262144 ] 2>/dev/null; then
-    echo 1
-    return 0
-  fi
-  if [ "$cores" -ge 4 ] 2>/dev/null; then
-    echo 3
-  elif [ "$cores" -ge 2 ] 2>/dev/null; then
-    echo 2
-  else
-    echo 1
-  fi
-}
-
-resolve_jobs() {
-  cores="$1"
-  mem_kb="$2"
-  case "${JOBS:-auto}" in
-    auto|"") JOBS_N="$(jobs_auto "$cores" "$mem_kb")" ;;
-    *[!0-9]* ) JOBS_N=1 ;;
-    0) JOBS_N=1 ;;
-    *) JOBS_N="$JOBS" ;;
-  esac
-  [ "$JOBS_N" -ge 1 ] 2>/dev/null || JOBS_N=1
-  if [ "$JOBS_N" -gt "$cores" ] 2>/dev/null; then
-    JOBS_N="$cores"
-  fi
-  [ "$JOBS_N" -ge 1 ] 2>/dev/null || JOBS_N=1
-}
-
-# ---------------- collection functions ----------------
-detect_device_model() {
-  if [ -f /proc/device-tree/model ]; then
-    tr '\000' '\n' </proc/device-tree/model 2>/dev/null | head -n 1
-    return 0
-  fi
-  if [ -f /tmp/sysinfo/model ]; then
-    head -n 1 /tmp/sysinfo/model 2>/dev/null
-    return 0
-  fi
-  echo ""
-}
-
-write_profile_json() {
-  cores="$1"
-  mem_kb="$2"
-  out_free_kb="$3"
-
-  arch="$(uname -m 2>/dev/null || echo unknown)"
-  host="$(hostname 2>/dev/null || echo "")"
-  model="$(detect_device_model)"
-
-  # KeeneticOS version: best-effort from ndmc_show_version if already collected, else empty
-  fw_ver=""
-  if [ -f "$WORK/ndm/ndmc_show_version.txt" ]; then
-    fw_ver="$(head -n 2 "$WORK/ndm/ndmc_show_version.txt" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
-  fi
-
-  cat >"$WORK/meta/profile_selected.json" <<EOF
-{
-  "tool": {"name": "$(json_escape "$PROG")", "version": "$(json_escape "$VERSION")"},
-  "lang": "$(json_escape "$LANG_UI")",
-  "profile": "$(json_escape "$PROFILE")",
-  "mode": "$(json_escape "$MODE")",
-  "collectors": "$(json_escape "$COLLECTORS")",
-  "custom_collectors": "$(json_escape "$CUSTOM_COLLECTORS")",
-  "deps": {"mode": "$(json_escape "$DEPS_MODE")", "level": "$(json_escape "$DEPS_LEVEL")", "no_install": $NO_INSTALL},
-  "limits": {"max_cpu_pct": $MAX_CPU, "max_mem_pct": $MAX_MEM},
-  "jobs": $JOBS_N,
-  "arch": "$(json_escape "$arch")",
-  "cores": $cores,
-  "mem_total_kb": $mem_kb,
-  "outbase": "$(json_escape "$OUTBASE")",
-  "out_free_kb": $out_free_kb,
-  "hostname": "$(json_escape "$host")",
-  "device_model": "$(json_escape "$model")",
-  "keeneticos_version_hint": "$(json_escape "$fw_ver")"
-}
-EOF
-}
-
-collect_meta() {
-  ensure_dir "$WORK/meta" || return 1
-
-  printf '%s\n' "$VERSION" >"$WORK/meta/tool_version.txt" 2>/dev/null || true
-  printf '%s\n' "$(now_utc)" >"$WORK/meta/started_utc.txt" 2>/dev/null || true
-  uname -a >"$WORK/meta/uname.txt" 2>&1 || true
-  hostname >"$WORK/meta/hostname.txt" 2>&1 || true
-
-  # Effective options (human-readable)
-  {
-    echo "LANG_UI=$LANG_UI"
-    echo "PROFILE=$PROFILE"
-    echo "MODE=$MODE"
-    echo "COLLECTORS=$COLLECTORS"
-    echo "CUSTOM_COLLECTORS=$CUSTOM_COLLECTORS"
-    echo "NO_INSTALL=$NO_INSTALL"
-    echo "DEPS_MODE=$DEPS_MODE"
-    echo "DEPS_LEVEL=$DEPS_LEVEL"
-    echo "MAX_CPU=$MAX_CPU"
-    echo "MAX_MEM=$MAX_MEM"
-    echo "JOBS=$JOBS"
-    echo "JOBS_N=$JOBS_N"
-    echo "OUTBASE=$OUTBASE"
-    echo "WORK=$WORK"
-    echo "ARCHIVE=$ARCHIVE"
-  } >"$WORK/meta/options_effective.txt" 2>/dev/null || true
-
-  # Write profile JSON
-  cores="$(get_cores)"
-  mem_kb="$(mem_total_kb)"
-  out_free_kb=0
-  if have df; then
-    out_free_kb="$(df -k "$OUTBASE" 2>/dev/null | awk 'NR==2{print $4}' | head -n 1)"
-    [ -n "$out_free_kb" ] || out_free_kb=0
-  fi
-  write_profile_json "$cores" "$mem_kb" "${out_free_kb:-0}" || true
-}
-
-collect_proc() {
-  ensure_dir "$WORK/sys/proc" || true
-  for f in cpuinfo meminfo mounts cmdline version uptime loadavg partitions; do
-    [ -f "/proc/$f" ] || continue
-    cp -p "/proc/$f" "$WORK/sys/proc/$f.txt" 2>/dev/null || true
+  for p in $INSTALLED_TOP_PKGS; do
+    [ -n "$p" ] || continue
+    say "opkg remove $p"
+    opkg remove "$p" >/dev/null 2>&1 || true
   done
-  # process list
-  if have ps; then
-    ps w >"$WORK/sys/ps.txt" 2>&1 || true
-  fi
-  if have top; then
-    top -bn1 >"$WORK/sys/top.txt" 2>&1 || true
-  fi
 }
 
-collect_sys_commands() {
+init_wizard() {
+  echo >&2
+  echo "$(T WIZ_TITLE)" >&2
+  echo >&2
+
+  lang="$(ask "$(T WIZ_LANG)" "$LANG_UI")"
+  case "$lang" in ru|en) LANG_UI="$lang" ;; esac
+
+  echo >&2
+  echo "$(T WIZ_PROFILE_HELP)" >&2
+  p="$(ask "$(T WIZ_PROFILE)" "$PROFILE")"
+  case "$p" in auto|forensic|diagnostic|lite) PROFILE="$p" ;; esac
+
+  echo >&2
+  echo "$(T WIZ_MODE_HELP)" >&2
+  m="$(ask "$(T WIZ_MODE)" "$MODE")"
+  case "$m" in full|safe|extream) MODE="$m" ;; esac
+
+  echo >&2
+  echo "$(T WIZ_COLLECTORS_HELP)" >&2
+  c="$(ask "$(T WIZ_COLLECTORS)" "$COLLECTORS")"
+  case "$c" in all|shonly|shpy|custom) COLLECTORS="$c" ;; esac
+  if [ "$COLLECTORS" = "custom" ]; then
+    CUSTOM_COLLECTORS="$(ask "$(T WIZ_CUSTOM)" "$CUSTOM_COLLECTORS")"
+  fi
+
+  echo "$(T WIZ_OUTDIR_FIXED) $OUTBASE_POLICY" >&2
+
+  if ask_yn "$(T WIZ_CLEAN_OLD)" "n"; then CLEAN_OLD=1; else CLEAN_OLD=0; fi
+  if ask_yn "$(T WIZ_CLEAN_TMP)" "n"; then CLEAN_TMP=1; else CLEAN_TMP=0; fi
+  if ask_yn "$(T WIZ_DEBUG)" "y"; then DEBUG=1; else DEBUG=0; fi
+  if ask_yn "$(T WIZ_DEPS_CLEANUP)" "y"; then DEPS_MODE="cleanup"; else DEPS_MODE="keep"; fi
+  if ask_yn "$(T WIZ_SPINNER)" "y"; then SPINNER=1; else SPINNER=0; fi
+
+  JOBS="$(ask "$(T WIZ_JOBS)" "$JOBS")"
+  MAX_CPU="$(ask "$(T WIZ_LIMITS_CPU)" "$MAX_CPU")"
+  MAX_MEM="$(ask "$(T WIZ_LIMITS_MEM)" "$MAX_MEM")"
+
+  if [ "$MODE" = "extream" ]; then
+    if ask_yn "$(T WIZ_DEPS_LEVEL)" "n"; then DEPS_LEVEL="collectors"; else DEPS_LEVEL="core"; fi
+  fi
+
+  save_config
+  echo >&2
+  echo "$(T SAVED) $CONFIG_PATH" >&2
+}
+
+setup_workdir() {
+  ensure_dir "$OUTBASE_POLICY" || die "Cannot create $OUTBASE_POLICY"
+  host="$(hostname 2>/dev/null | head -n1)"
+  [ -n "$host" ] || host="router"
+  ts="$(ts_utc_path)"
+  pid="$$"
+  BASE="keenetic-maxprobe-${host}-${pid}-${ts}"
+  WORK="$OUTBASE_POLICY/${BASE}.work"
+  ARCHIVE="$OUTBASE_POLICY/${BASE}.tar.gz"
+
+  ensure_dir "$WORK" || die "Cannot create WORK: $WORK"
+  ensure_dir "$WORK/meta" || die "Cannot create meta: $WORK/meta"
+  ensure_dir "$WORK/analysis" || true
   ensure_dir "$WORK/sys" || true
-  if have dmesg; then dmesg >"$WORK/sys/dmesg.txt" 2>&1 || true; fi
-  if have logread; then logread >"$WORK/sys/logread.txt" 2>&1 || true; fi
-  if have uptime; then uptime >"$WORK/sys/uptime.txt" 2>&1 || true; fi
-  if have df; then df -h >"$WORK/sys/df_h.txt" 2>&1 || true; df -k >"$WORK/sys/df_k.txt" 2>&1 || true; fi
-  if have free; then free >"$WORK/sys/free.txt" 2>&1 || true; fi
-  if have mount; then mount >"$WORK/sys/mount.txt" 2>&1 || true; fi
-  if have lsmod; then lsmod >"$WORK/sys/lsmod.txt" 2>&1 || true; fi
-}
-
-mirror_abs_dir() {
-  src="$1"
-  [ -d "$src" ] || return 0
-  case "$src" in
-    /var/tmp*|/tmp*|/proc*|/sys*|/dev*|/run*) return 0 ;;
-  esac
-  dst="$WORK/fs$src"
-  ensure_dir "$dst" || return 0
-  # tar copy
-  ( cd "$src" 2>/dev/null && run_lowprio tar -cf - . 2>/dev/null ) | ( cd "$dst" 2>/dev/null && tar -xf - 2>/dev/null ) || true
-}
-
-mirror_abs_file() {
-  src="$1"
-  [ -f "$src" ] || return 0
-  case "$src" in
-    /var/tmp*|/tmp*|/proc*|/sys*|/dev*|/run*) return 0 ;;
-  esac
-  dst="$WORK/fs$src"
-  ensure_dir "$(dirname "$dst")" || return 0
-  cp -p "$src" "$dst" 2>/dev/null || true
-}
-
-safe_redact_fs() {
-  [ "$MODE" = "safe" ] || return 0
-  set_phase "Safe-mode: redacting secrets in fs mirror"
-  # Best-effort patterns; keep file presence but replace content
-  find "$WORK/fs" -type f 2>/dev/null | while IFS= read -r f; do
-    bn="$(basename "$f")"
-    case "$bn" in
-      shadow|gshadow|*id_rsa*|*id_ed25519*|authorized_keys|known_hosts|ssh_host_*|*.key|*.pem|*.p12|*.pfx)
-        printf '%s\n' "<REDACTED by keenetic-maxprobe safe mode>" >"$f" 2>/dev/null || true
-        ;;
-    esac
-  done
-}
-
-mirror_filesystems() {
-  ensure_dir "$WORK/fs" || return 0
-
-  # Config roots
-  mirror_abs_dir "/etc"
-  mirror_abs_dir "/opt/etc"
-  mirror_abs_dir "/opt/var/log"
-  mirror_abs_dir "/opt/var/lib/opkg"
-  mirror_abs_dir "/opt/var/spool/cron"
-  mirror_abs_dir "/storage/etc"
-  mirror_abs_dir "/storage/system"
-  mirror_abs_dir "/storage/scripts"
-  mirror_abs_dir "/root"
-  mirror_abs_dir "/home"
-
-  # Individual sensitive files (only in full/extream)
-  if [ "$MODE" = "full" ] || [ "$MODE" = "extream" ]; then
-    mirror_abs_file "/etc/passwd"
-    mirror_abs_file "/etc/group"
-    mirror_abs_file "/etc/shadow"
-    mirror_abs_file "/etc/gshadow"
-  fi
-
-  safe_redact_fs || true
-}
-
-collect_entware() {
+  ensure_dir "$WORK/net" || true
   ensure_dir "$WORK/entware" || true
-  if have opkg; then
-    opkg --version >"$WORK/entware/opkg_version.txt" 2>&1 || true
-    opkg list-installed >"$WORK/entware/opkg_list_installed.txt" 2>&1 || true
-    opkg status >"$WORK/entware/opkg_status.txt" 2>&1 || true
-  else
-    printf '%s\n' "opkg not found" >"$WORK/entware/opkg_status.txt" 2>/dev/null || true
-  fi
-
-  # init.d inventory
-  initd="/opt/etc/init.d"
-  out_json="$WORK/entware/services.json"
-  : >"$out_json" 2>/dev/null || true
-  if [ -d "$initd" ]; then
-    # produce simple JSON list
-    printf '[\n' >"$out_json" 2>/dev/null || true
-    first=1
-    for s in "$initd"/*; do
-      [ -f "$s" ] || continue
-      name="$(basename "$s")"
-      exec=0
-      [ -x "$s" ] && exec=1
-      sha=""
-      if have sha256sum; then
-        sha="$(sha256sum "$s" 2>/dev/null | awk '{print $1}' | head -n 1)"
-      elif have md5sum; then
-        sha="$(md5sum "$s" 2>/dev/null | awk '{print $1}' | head -n 1)"
-      fi
-      [ "$first" -eq 1 ] || printf ',\n' >>"$out_json"
-      first=0
-      printf '  {"script": "%s", "executable": %s, "sha256": "%s"}' "$(json_escape "$name")" "$exec" "$(json_escape "$sha")" >>"$out_json" 2>/dev/null || true
-    done
-    printf '\n]\n' >>"$out_json" 2>/dev/null || true
-  else
-    printf '[]\n' >"$out_json" 2>/dev/null || true
-  fi
-}
-
-collect_network() {
-  ensure_dir "$WORK/net" || true
-
-  # Prefer ip/ss from iproute2 if present
-  if have ip; then
-    ip addr show >"$WORK/net/ip_addr.txt" 2>&1 || true
-    ip -4 -o addr show >"$WORK/net/ip_addr4_oneline.txt" 2>&1 || true
-    ip route show >"$WORK/net/ip_route.txt" 2>&1 || true
-    ip rule show >"$WORK/net/ip_rule.txt" 2>&1 || true
-    ip neigh show >"$WORK/net/ip_neigh.txt" 2>&1 || true
-  elif have ifconfig; then
-    ifconfig -a >"$WORK/net/ifconfig.txt" 2>&1 || true
-  fi
-
-  if have ss; then
-    ss -lntup >"$WORK/net/ss_listen.txt" 2>&1 || true
-  fi
-  if have netstat; then
-    netstat -lntup >"$WORK/net/netstat_listen.txt" 2>&1 || true
-  fi
-
-  collect_listen_ports || true
-}
-
-collect_listen_ports() {
-  out="$WORK/net/listen_ports.tsv"
-  : >"$out" 2>/dev/null || true
-  printf '# proto\tip\tport\tstate\tsource\n' >>"$out" 2>/dev/null || true
-
-  if [ -s "$WORK/net/ss_listen.txt" ]; then
-    awk 'BEGIN{OFS="\t"} $1=="LISTEN"{split($4,a,":"); ip=a[1]; port=a[2]; if(port=="")next; print "tcp", ip, port, "LISTEN", "ss"}' \
-      "$WORK/net/ss_listen.txt" 2>/dev/null >>"$out" || true
-    return 0
-  fi
-  if [ -s "$WORK/net/netstat_listen.txt" ]; then
-    awk 'BEGIN{OFS="\t"} $1 ~ /^tcp/ && $6=="LISTEN"{split($4,a,":"); ip=a[1]; port=a[2]; if(port=="")next; print "tcp", ip, port, "LISTEN", "netstat"}' \
-      "$WORK/net/netstat_listen.txt" 2>/dev/null >>"$out" || true
-    return 0
-  fi
-
-  # Fallback: /proc/net/tcp & tcp6 (no pid mapping)
-  if [ -f /proc/net/tcp ]; then
-    tail -n +2 /proc/net/tcp 2>/dev/null | while IFS= read -r ln; do
-      st="$(printf '%s' "$ln" | awk '{print $4}')"
-      [ "$st" = "0A" ] || continue
-      la="$(printf '%s' "$ln" | awk '{print $2}')"
-      ip_hex="${la%%:*}"
-      port_hex="${la##*:}"
-      port="$(printf '%d' "0x$port_hex" 2>/dev/null || echo 0)"
-      printf 'tcp\t%s\t%s\tLISTEN\t/proc/net/tcp\n' "$ip_hex" "$port" >>"$out" 2>/dev/null || true
-    done
-  fi
-  if [ -f /proc/net/tcp6 ]; then
-    tail -n +2 /proc/net/tcp6 2>/dev/null | while IFS= read -r ln; do
-      st="$(printf '%s' "$ln" | awk '{print $4}')"
-      [ "$st" = "0A" ] || continue
-      la="$(printf '%s' "$ln" | awk '{print $2}')"
-      ip_hex="${la%%:*}"
-      port_hex="${la##*:}"
-      port="$(printf '%d' "0x$port_hex" 2>/dev/null || echo 0)"
-      printf 'tcp6\t%s\t%s\tLISTEN\t/proc/net/tcp6\n' "$ip_hex" "$port" >>"$out" 2>/dev/null || true
-    done
-  fi
-}
-
-collect_http_probe() {
-  out="$WORK/net/http_probe.tsv"
-  : >"$out" 2>/dev/null || true
-  printf '# ts_utc\thost\tport\tscheme\tpath\tcode\tnote\n' >>"$out" 2>/dev/null || true
-
-  ensure_cmd_via_opkg curl curl ca-bundle || true
-  have curl || { printf '# curl not available; skipped\n' >>"$out" 2>/dev/null || true; return 0; }
-
-  hosts="127.0.0.1"
-  if have ip; then
-    addrs="$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | sort -u | tr '\n' ' ')"
-    [ -n "$addrs" ] && hosts="$hosts $addrs"
-  fi
-
-  ports="80 443 79"
-  if [ -f "$WORK/net/listen_ports.tsv" ]; then
-    more="$(awk 'BEGIN{c=0} $1!~/#/ && $3 ~ /^[0-9]+$/ {print $3}' "$WORK/net/listen_ports.tsv" 2>/dev/null | sort -n | uniq | head -n 50 | tr '\n' ' ')"
-    [ -n "$more" ] && ports="$ports $more"
-  fi
-  ports="$(printf '%s\n' $ports 2>/dev/null | awk '!a[$0]++' | tr '\n' ' ')"
-
-  paths="/ /rci/ /rci/show/system /rci/show/version /rci/show/log /rci/show/interface"
-  for h in $hosts; do
-    for p in $ports; do
-      scheme="http"
-      case "$p" in 443|8443|9443) scheme="https" ;; esac
-      for path in $paths; do
-        url="${scheme}://${h}:${p}${path}"
-        code="$(curl -k -m 3 -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
-        ts="$(now_utc)"
-        note=""
-        case "$code" in
-          000) note="no_connect" ;;
-          200) note="ok" ;;
-          301|302|307|308) note="redirect" ;;
-          401) note="auth_required" ;;
-          403) note="forbidden" ;;
-          404) note="not_found" ;;
-          405) note="method_not_allowed" ;;
-          *) note="http_$code" ;;
-        esac
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ts" "$h" "$p" "$scheme" "$path" "$code" "$note" >>"$out" 2>/dev/null || true
-      done
-    done
-  done
-}
-
-sanitize_path() {
-  # /rci/show/system -> rci_show_system
-  printf '%s' "$1" | sed 's#^/##; s#[^A-Za-z0-9._-]#_#g'
-}
-
-collect_web_probe() {
-  # Extended web surface probe: headers + limited body
-  [ "$MODE" = "full" ] || [ "$MODE" = "extream" ] || return 0
-
-  ensure_cmd_via_opkg curl curl ca-bundle || true
-  have curl || return 0
-
-  ensure_dir "$WORK/web" || true
-  manifest="$WORK/web/probe.tsv"
-  : >"$manifest" 2>/dev/null || true
-  printf '# ts_utc\thost\tport\tscheme\tpath\tcode\tbytes\n' >>"$manifest" 2>/dev/null || true
-
-  hosts="127.0.0.1"
-  if have ip; then
-    addrs="$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | sort -u | tr '\n' ' ')"
-    [ -n "$addrs" ] && hosts="$hosts $addrs"
-  fi
-
-  ports="80 443 79"
-  if [ -f "$WORK/net/listen_ports.tsv" ]; then
-    more="$(awk '$1!~/#/ && $3 ~ /^[0-9]+$/ {print $3}' "$WORK/net/listen_ports.tsv" 2>/dev/null | sort -n | uniq)"
-    [ -n "$more" ] && ports="$ports $more"
-  fi
-  ports="$(printf '%s\n' $ports 2>/dev/null | awk '!a[$0]++' | head -n 200 | tr '\n' ' ')"
-
-  paths="/ /robots.txt /api /metrics /swagger.json /openapi.json /rci/ /rci/show/system /rci/show/version"
-  if [ "$MODE" = "extream" ]; then
-    paths="$paths /rci/show/log /rci/show/interface /rci/show/running-config /rci/show/config"
-  fi
-
-  max_body=262144 # 256 KB
-  [ "$MODE" = "extream" ] && max_body=524288 # 512 KB
-
-  for h in $hosts; do
-    for p in $ports; do
-      for scheme in http https; do
-        url="${scheme}://${h}:${p}/"
-        code="$(curl -k -m 3 -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
-        [ "$code" = "000" ] && continue
-
-        port_dir="$WORK/web/${h}_${p}_${scheme}"
-        ensure_dir "$port_dir" || true
-
-        for path in $paths; do
-          sp="$(sanitize_path "$path")"
-          headers="$port_dir/${sp}.headers"
-          body="$port_dir/${sp}.body"
-          tmp_body="$port_dir/${sp}.body.tmp"
-          url="${scheme}://${h}:${p}${path}"
-          ts="$(now_utc)"
-
-          # Download: headers + body sample
-          curl -k -m 5 -sS -D "$headers" "$url" 2>/dev/null | head -c "$max_body" >"$tmp_body" 2>/dev/null || true
-          bytes="$(wc -c <"$tmp_body" 2>/dev/null || echo 0)"
-          mv "$tmp_body" "$body" 2>/dev/null || true
-
-          code_line="$(awk 'NR==1{print $2}' "$headers" 2>/dev/null | head -n 1)"
-          [ -n "$code_line" ] || code_line="000"
-
-          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ts" "$h" "$p" "$scheme" "$path" "$code_line" "$bytes" >>"$manifest" 2>/dev/null || true
-        done
-      done
-    done
-  done
-}
-
-collect_firewall() {
-  ensure_dir "$WORK/net" || true
-
-  if have nft; then
-    nft list ruleset >"$WORK/net/nft_ruleset.txt" 2>&1 || true
-  elif [ "$NO_INSTALL" -eq 0 ]; then
-    ensure_cmd_via_opkg nft nftables || true
-    have nft && nft list ruleset >"$WORK/net/nft_ruleset.txt" 2>&1 || true
-  fi
-
-  if have iptables-save; then
-    iptables-save >"$WORK/net/iptables_rules.v4" 2>&1 || true
-  elif have iptables; then
-    iptables -S >"$WORK/net/iptables_rules.v4" 2>&1 || true
-  fi
-
-  if have ip6tables-save; then
-    ip6tables-save >"$WORK/net/iptables_rules.v6" 2>&1 || true
-  elif have ip6tables; then
-    ip6tables -S >"$WORK/net/iptables_rules.v6" 2>&1 || true
-  fi
-}
-
-collect_ndmc() {
   ensure_dir "$WORK/ndm" || true
-  have ndmc || { warn "ndmc not found; skipping ndmc snapshots"; return 0; }
+  ensure_dir "$WORK/web" || true
+  ensure_dir "$WORK/fs" || true
 
-  ndmc -c 'show version' >"$WORK/ndm/ndmc_show_version.txt" 2>&1 || true
-  ndmc -c 'show system' >"$WORK/ndm/ndmc_show_system.txt" 2>&1 || true
-  ndmc -c 'show interface' >"$WORK/ndm/ndmc_show_interface.txt" 2>&1 || true
-  ndmc -c 'show ip route' >"$WORK/ndm/ndmc_show_ip_route.txt" 2>&1 || true
-  ndmc -c 'show ip policy' >"$WORK/ndm/ndmc_show_ip_policy.txt" 2>&1 || true
-  ndmc -c 'show log' >"$WORK/ndm/ndmc_show_log.txt" 2>&1 || true
-  ndmc -c 'help' >"$WORK/ndm/ndmc_help.txt" 2>&1 || true
+  RUNLOG="$WORK/meta/run.log"
+  ERRLOG="$WORK/meta/errors.log"
+  PHASE_FILE="$WORK/meta/phase.txt"
+  PROGRESS_FILE="$WORK/meta/progress.txt"
 
-  if [ "$PROFILE" = "forensic" ] || [ "$MODE" = "extream" ] || [ "$DEBUG" -eq 1 ]; then
-    ndmc -c 'show running-config' >"$WORK/ndm/ndmc_show_running_config.txt" 2>&1 || true
-    ndmc -c 'show config' >"$WORK/ndm/ndmc_show_config.txt" 2>&1 || true
-  fi
-
-  if [ "$MODE" = "extream" ]; then
-    ndmc -c 'show service' >"$WORK/ndm/ndmc_show_service.txt" 2>&1 || true
-    ndmc -c 'show dns' >"$WORK/ndm/ndmc_show_dns.txt" 2>&1 || true
-    ndmc -c 'show ip neighbour' >"$WORK/ndm/ndmc_show_ip_neighbour.txt" 2>&1 || true
-  fi
-}
-
-run_collectors_parallel() {
-  out="$WORK/sys/collectors"
-  ensure_dir "$out" || true
-
-  maybe_install_collector_runtimes || true
-
-  pids=""
-  running_count() {
-    cnt=0
-    for pid in $pids; do
-      if kill -0 "$pid" 2>/dev/null; then
-        cnt=$((cnt + 1))
-      fi
-    done
-    echo "$cnt"
-  }
-
-  wait_pool() {
-    while :; do
-      cnt="$(running_count)"
-      [ "$cnt" -lt "$JOBS_N" ] 2>/dev/null && return 0
-      sleep 1
-    done
-  }
-
-  launch() {
-    name="$1"
-    outfile="$2"
-    shift 2
-    say "[*] RUN [$name] -> $outfile"
-    (
-      wait_for_resources || true
-      run_lowprio "$@" >"$outfile" 2>&1
-    ) &
-    pid=$!
-    pids="$pids $pid"
-  }
-
-  finish_all() {
-    for pid in $pids; do
-      wait "$pid" 2>/dev/null || true
-    done
-    pids=""
-  }
-
-  set_phase "Collectors: inventory (parallel jobs=$JOBS_N)"
-
-  if collector_enabled py; then
-    if have python3 && [ -f "$COLLECTORS_DIR/py/analyze.py" ]; then
-      wait_pool
-      launch "collector_py_inventory" "$out/python_inventory.json" python3 "$COLLECTORS_DIR/py/analyze.py" --inventory --workdir "$WORK" --stdout
-    else
-      printf '%s\n' "python3 not found; skipped" >"$out/python.status" 2>/dev/null || true
-    fi
-  fi
-
-  if collector_enabled lua; then
-    if have lua && [ -f "$COLLECTORS_DIR/lua/inventory.lua" ]; then
-      wait_pool
-      launch "collector_lua_inventory" "$out/lua_inventory.txt" lua "$COLLECTORS_DIR/lua/inventory.lua" "$WORK"
-    else
-      printf '%s\n' "lua not found; skipped" >"$out/lua.status" 2>/dev/null || true
-    fi
-  fi
-
-  if collector_enabled perl; then
-    if have perl && [ -f "$COLLECTORS_DIR/perl/inventory.pl" ]; then
-      wait_pool
-      launch "collector_perl_inventory" "$out/perl_inventory.txt" perl "$COLLECTORS_DIR/perl/inventory.pl" "$WORK"
-    else
-      printf '%s\n' "perl not found; skipped" >"$out/perl.status" 2>/dev/null || true
-    fi
-  fi
-
-  if collector_enabled ruby; then
-    if have ruby && [ -f "$COLLECTORS_DIR/ruby/inventory.rb" ]; then
-      wait_pool
-      launch "collector_ruby_inventory" "$out/ruby_inventory.txt" ruby "$COLLECTORS_DIR/ruby/inventory.rb" "$WORK"
-    else
-      printf '%s\n' "ruby not found; skipped" >"$out/ruby.status" 2>/dev/null || true
-    fi
-  fi
-
-  if collector_enabled node; then
-    if have node && [ -f "$COLLECTORS_DIR/node/inventory.js" ]; then
-      wait_pool
-      launch "collector_node_inventory" "$out/node_inventory.txt" node "$COLLECTORS_DIR/node/inventory.js" "$WORK"
-    else
-      printf '%s\n' "node not found; skipped" >"$out/node.status" 2>/dev/null || true
-    fi
-  fi
-
-  if collector_enabled go; then
-    if [ -f "$COLLECTORS_DIR/go/run.sh" ]; then
-      wait_pool
-      launch "collector_go_inventory" "$out/go_inventory.txt" sh "$COLLECTORS_DIR/go/run.sh" "$WORK"
-    else
-      printf '%s\n' "go collector not found; skipped" >"$out/go.status" 2>/dev/null || true
-    fi
-  fi
-
-  finish_all
-}
-
-scan_sensitive() {
-  ensure_dir "$WORK/analysis" || true
-  out="$WORK/analysis/SENSITIVE_LOCATIONS.md"
-  : >"$out" 2>/dev/null || true
-
-  cat >>"$out" <<'EOF'
-# Sensitive locations (best-effort)
-
-Этот файл — «карта», где *могут* находиться секреты (пароли, токены, ключи).
-
-**Значения секретов НЕ выводятся**, только путь/строка/ключевое слово.
-
-Перед тем как отправлять архив кому‑то — пройдитесь по этому списку и замаскируйте данные в `fs/...`
-(или удалите соответствующие файлы из архива).
-EOF
-
-  pat='password|passwd|secret|token|api[_-]?key|private[_-]?key|-----BEGIN|pppoe|wpa|psk|key=|auth=|telegram|bot_token|client_secret'
-  find "$WORK/fs" -type f -size -1024k 2>/dev/null | while IFS= read -r f; do
-    base="$(basename "$f")"
-    case "$base" in
-      *.conf|*.cfg|*.ini|*.json|*.yaml|*.yml|*.sh|*.rc|*.env|passwd|shadow|group|gshadow|*wireless*|*ppp*|*vpn*|*dhcp*|*dns*|*dropbear*|*ssh* )
-        grep -nEi "$pat" "$f" 2>/dev/null | head -n 50 | while IFS= read -r line; do
-          ln_no="${line%%:*}"
-          rest="${line#*:}"
-          kw="$(printf '%s' "$rest" | grep -Eio "$pat" 2>/dev/null | head -n 1)"
-          rel="${f#$WORK/}"
-          printf -- "- %s:%s (match: %s)\n" "$rel" "$ln_no" "${kw:-?}" >>"$out" 2>/dev/null || true
-        done
-        ;;
-    esac
-  done
-}
-
-write_redaction_guides() {
-  ensure_dir "$WORK/analysis" || true
-
-  cat >"$WORK/analysis/REDACTION_GUIDE_RU.md" <<'EOF'
-# Руководство по редактированию (redaction) перед отправкой архива
-
-## Что делать
-1) Откройте `analysis/SENSITIVE_LOCATIONS.md`.
-2) Пройдитесь по перечисленным путям в `fs/` и замаскируйте значения (пароли, ключи, токены).
-3) Если вы сомневаетесь — удалите файл целиком из архива перед отправкой.
-
-## Типовые файлы с секретами
-- `fs/etc/shadow`, `fs/etc/gshadow`
-- `fs/opt/etc/*` (VPN, DNS, proxy, web‑морды)
-- `fs/**/.env`, `fs/**/config*.json`
-- `*.key`, `*.pem`, `id_rsa`, `id_ed25519`, `authorized_keys`
-
-## Важно
-В режиме `extream` инструмент намеренно собирает больше чувствительных данных.
-EOF
-
-  cat >"$WORK/analysis/REDACTION_GUIDE_EN.md" <<'EOF'
-# Redaction guide before sharing the archive
-
-## What to do
-1) Open `analysis/SENSITIVE_LOCATIONS.md`.
-2) Review the listed paths inside `fs/` and mask values (passwords, keys, tokens).
-3) If unsure, remove the file from the archive before sharing.
-
-## Typical secret files
-- `fs/etc/shadow`, `fs/etc/gshadow`
-- `fs/opt/etc/*` (VPN, DNS, proxy, web UIs)
-- `fs/**/.env`, `fs/**/config*.json`
-- `*.key`, `*.pem`, `id_rsa`, `id_ed25519`, `authorized_keys`
-
-## Note
-In `extream` mode the tool intentionally collects more sensitive data.
-EOF
-}
-
-generate_reports() {
-  ensure_dir "$WORK/analysis" || true
-
-  if have python3 && [ -f "$COLLECTORS_DIR/py/analyze.py" ]; then
-    python3 "$COLLECTORS_DIR/py/analyze.py" --report --workdir "$WORK" >>"$RUNLOG" 2>>"$ERRLOG" || true
-    return 0
-  fi
-
-  # Minimal report (no python)
-  cat >"$WORK/analysis/REPORT_RU.md" <<EOF
-# Отчёт keenetic-maxprobe (минимальный)
-
-Python3 не найден, поэтому расширенный анализ (analyze.py) не выполнен.
-
-## Что есть в архиве
-- meta/ — лог, прогресс, параметры запуска
-- fs/ — зеркало конфигов (самое важное)
-- ndm/ — снимки ndmc (если ndmc есть)
-- net/ и web/ — порты и web‑поверхности (если curl есть)
-
-## Как поставить python3 вручную (Entware)
-\`\`\`sh
-opkg update
-opkg install python3
-\`\`\`
-
-После установки запустите снова:
-\`\`\`sh
-keenetic-maxprobe
-\`\`\`
-EOF
-
-  cat >"$WORK/analysis/REPORT_EN.md" <<EOF
-# keenetic-maxprobe report (minimal)
-
-python3 is not available, so the extended analyzer (analyze.py) was not executed.
-
-## What's inside
-- meta/ — log, progress, effective options
-- fs/ — config mirror (most important)
-- ndm/ — ndmc snapshots (if ndmc exists)
-- net/ and web/ — ports and web surface (if curl exists)
-
-## Install python3 manually (Entware)
-\`\`\`sh
-opkg update
-opkg install python3
-\`\`\`
-
-Then run again:
-\`\`\`sh
-keenetic-maxprobe
-\`\`\`
-EOF
-}
-
-pack_archive() {
-  [ -n "$WORK" ] || return 1
-  [ -n "$ARCHIVE" ] || return 1
-
-  ( cd "$WORK" 2>/dev/null && run_lowprio tar -czf "$ARCHIVE" . 2>>"$ERRLOG" ) || return 1
-
-  if have sha256sum; then
-    sha256sum "$ARCHIVE" >"$ARCHIVE.sha256" 2>/dev/null || true
-  elif have openssl; then
-    openssl dgst -sha256 "$ARCHIVE" >"$ARCHIVE.sha256" 2>/dev/null || true
-  fi
+  : >"$RUNLOG" 2>/dev/null || true
+  : >"$ERRLOG" 2>/dev/null || true
+  printf '%s\n' "$VERSION" >"$WORK/meta/version.txt" 2>/dev/null || true
+  printf '%s\n' "$PROFILE" >"$WORK/meta/profile.txt" 2>/dev/null || true
+  printf '%s\n' "$MODE" >"$WORK/meta/mode.txt" 2>/dev/null || true
+  printf '%s\n' "$(now_utc)" >"$WORK/meta/started_utc.txt" 2>/dev/null || true
 }
 
 cleanup_workdir() {
-  [ -n "$WORK" ] || return 0
+  stop_spinner
+  stop_metrics
+  if [ "$KEEP_WORK" = "1" ]; then
+    warn "KMP_KEEP_WORK=1, leaving WORKDIR: $WORK"
+    return 0
+  fi
+  [ -n "${WORK:-}" ] || return 0
   rm -rf "$WORK" 2>/dev/null || true
 }
 
-# ---------------- step wrapper ----------------
-step() {
-  label="$1"
-  func="$2"
+clean_old_archives() {
+  [ "$CLEAN_OLD" -eq 1 ] 2>/dev/null || return 0
+  rm -f "$OUTBASE_POLICY"/keenetic-maxprobe-*.tar.gz "$OUTBASE_POLICY"/keenetic-maxprobe-*.tar.gz.sha256 2>/dev/null || true
+}
 
-  STEP_NO=$((STEP_NO + 1))
-  set_progress "$STEP_NO" "$TOTAL_STEPS"
-  set_phase "$label"
-  wait_for_resources || true
+clean_tmp_runs() {
+  [ "$CLEAN_TMP" -eq 1 ] 2>/dev/null || return 0
+  rm -rf /tmp/keenetic-maxprobe-* 2>/dev/null || true
+}
 
-  if type "$func" >/dev/null 2>&1; then
-    if ! "$func"; then
-      warn "Step failed: $label ($func)"
-    fi
-  else
-    warn "Missing function: $func (step: $label)"
+collect_system() {
+  set_phase "Sys: base inventory"
+  throttle_if_needed
+  uname -a >"$WORK/sys/uname.txt" 2>/dev/null || true
+  cat /proc/cpuinfo >"$WORK/sys/proc_cpuinfo.txt" 2>/dev/null || true
+  cat /proc/meminfo >"$WORK/sys/proc_meminfo.txt" 2>/dev/null || true
+  df -h >"$WORK/sys/df_h.txt" 2>/dev/null || true
+  mount >"$WORK/sys/mount.txt" 2>/dev/null || true
+  ps w >"$WORK/sys/ps_w.txt" 2>/dev/null || true
+}
+
+collect_network() {
+  set_phase "Net: sockets/routes"
+  throttle_if_needed
+  (ss -lntup 2>/dev/null || netstat -lntup 2>/dev/null || true) >"$WORK/net/listen.txt" 2>/dev/null || true
+  (ip addr 2>/dev/null || ifconfig 2>/dev/null || true) >"$WORK/net/addr.txt" 2>/dev/null || true
+  (ip route 2>/dev/null || route -n 2>/dev/null || true) >"$WORK/net/route.txt" 2>/dev/null || true
+}
+
+collect_entware() {
+  set_phase "Entware: opkg"
+  throttle_if_needed
+  if have opkg; then
+    opkg print-architecture >"$WORK/entware/opkg_arch.txt" 2>/dev/null || true
+    opkg list-installed >"$WORK/entware/opkg_list_installed.txt" 2>/dev/null || true
+    opkg status >"$WORK/entware/opkg_status.txt" 2>/dev/null || true
+  fi
+  [ -d /opt/etc/init.d ] && ls -la /opt/etc/init.d >"$WORK/entware/initd_ls.txt" 2>/dev/null || true
+}
+
+collect_ndm() {
+  set_phase "KeeneticOS: ndmc"
+  throttle_if_needed
+  if have ndmc; then
+    ndmc -c 'show version' >"$WORK/ndm/show_version.txt" 2>/dev/null || true
+    ndmc -c 'show system' >"$WORK/ndm/show_system.txt" 2>/dev/null || true
+    ndmc -c 'show interface' >"$WORK/ndm/show_interface.txt" 2>/dev/null || true
+    ndmc -c 'show log' >"$WORK/ndm/show_log.txt" 2>/dev/null || true
+    ndmc -c 'show running-config' >"$WORK/ndm/show_running-config.txt" 2>/dev/null || true
+    ndmc -c 'more flash:startup-config' >"$WORK/ndm/startup-config.txt" 2>/dev/null || true
   fi
 }
 
-# ---------------- Web UI ----------------
-webui_start() {
-  if ! have python3; then
-    warn "$(tr WEB_NEEDS_PY)"
-    warn "Install: opkg update && opkg install python3"
-    return 1
+collect_hooks() {
+  set_phase "Hooks: ndm directories"
+  throttle_if_needed
+  for d in /opt/etc/ndm /storage/etc/ndm /etc/ndm; do
+    [ -d "$d" ] || continue
+    out="$WORK/analysis/ndm_hooks_$(printf '%s' "$d" | sed 's|/|_|g; s/^_//').txt"
+    find "$d" -maxdepth 4 2>/dev/null | sort >"$out" 2>/dev/null || true
+  done
+}
+
+collect_web_probe() {
+  set_phase "Web: extended probe"
+  throttle_if_needed
+  have curl || return 0
+
+  ports="80 443 79 78 8081 90 8088 2000 2222"
+  if [ -s "$WORK/net/listen.txt" ]; then
+    extra="$(awk '{print $4}' "$WORK/net/listen.txt" 2>/dev/null | sed 's/.*://g' | grep -E '^[0-9]+$' | sort -nu | command tr '\n' ' ')"
+    ports="$ports $extra"
   fi
+
+  host="127.0.0.1"
+  out="$WORK/web/probe.tsv"
+  printf 'host\tport\tscheme\tpath\tcode\tbytes\n' >"$out" 2>/dev/null || true
+
+  for p in $ports; do
+    echo "$p" | grep -Eq '^[0-9]+$' || continue
+    for scheme in http https; do
+      first="$(curl -skI --connect-timeout 1 --max-time 2 "${scheme}://${host}:${p}/" 2>/dev/null | head -n 1)"
+      echo "$first" | grep -q '^HTTP/' || continue
+
+      for path in / /robots.txt /metrics /swagger.json /openapi.json /rci/ /auth; do
+        throttle_if_needed
+        url="${scheme}://${host}:${p}${path}"
+        bn="$(printf '%s' "$path" | sed 's|/|_|g; s/^_//')"
+        body="$WORK/web/${host}_${p}_${scheme}_${bn}.body"
+        hdr="$WORK/web/${host}_${p}_${scheme}_${bn}.headers"
+        curl -sk --connect-timeout 1 --max-time 3 -D "$hdr" -o "$body" --range 0-262143 "$url" 2>/dev/null || true
+        code="$(awk 'NR==1{print $2}' "$hdr" 2>/dev/null | head -n1)"
+        [ -n "$code" ] || code="000"
+        bytes="$(wc -c <"$body" 2>/dev/null | sed 's/ //g')"
+        [ -n "$bytes" ] || bytes="0"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$host" "$p" "$scheme" "$path" "$code" "$bytes" >>"$out" 2>/dev/null || true
+      done
+    done
+  done
+}
+
+mirror_tree() {
+  set_phase "FS: configs mirror"
+  throttle_if_needed
+  for src in /etc /opt/etc /opt/var /storage/etc; do
+    [ -d "$src" ] || continue
+    (cd / && tar -cf - "${src#/}" 2>/dev/null) | (cd "$WORK/fs" && tar -xf - 2>/dev/null) || true
+  done
+  # policy: never include /var/tmp
+  rm -rf "$WORK/fs/var/tmp" 2>/dev/null || true
+}
+
+pack_archive() {
+  set_phase "Packing: archive"
+  throttle_if_needed
+  (cd "$WORK" && tar -cf - . 2>/dev/null | gzip -1 >"$ARCHIVE") || die "Failed to create archive"
+  if have sha256sum; then
+    sha256sum "$ARCHIVE" >"$ARCHIVE.sha256" 2>/dev/null || true
+  fi
+}
+
+start_webui() {
+  have python3 || die "python3 not found. Install: opkg update && opkg install python3"
   srv="$COLLECTORS_DIR/py/webui/server.py"
-  if [ ! -f "$srv" ]; then
-    warn "Web UI server not found: $srv"
-    return 1
-  fi
-  # Do not print final URL here: server.py will print AFTER successful bind
-  say "[+] Starting Web UI server..."
-  python3 "$srv" --bind "$WEB_BIND" --port "$WEB_PORT" --lang "$LANG_UI" --probe-bin "$0"
+  [ -f "$srv" ] || die "Web UI server not found: $srv"
+  say "[+] Web UI: http://$WEB_BIND:$WEB_PORT/"
+  exec python3 "$srv" --bind "$WEB_BIND" --port "$WEB_PORT" --probe-bin "/opt/bin/keenetic-maxprobe"
 }
 
-# ---------------- main ----------------
 main() {
   load_config
   parse_args "$@"
-
-  case "$LANG_UI" in ru|en) ;; *) LANG_UI="ru" ;; esac
-  case "$MODE" in full|safe|extream) ;; *) MODE="full" ;; esac
-  case "$PROFILE" in auto|forensic|diagnostic|lite) ;; *) PROFILE="auto" ;; esac
-  case "$COLLECTORS" in all|shonly|shpy|custom) ;; *) COLLECTORS="all" ;; esac
-  case "$DEPS_MODE" in cleanup|keep) ;; *) DEPS_MODE="cleanup" ;; esac
-  case "$DEPS_LEVEL" in core|collectors) ;; *) DEPS_LEVEL="core" ;; esac
 
   if [ "$INIT" -eq 1 ]; then
     init_wizard
@@ -1534,119 +721,36 @@ main() {
   fi
 
   if [ "$WEB" -eq 1 ]; then
-    webui_start
-    exit $?
+    start_webui
   fi
 
-  if [ -n "${OUTDIR:-}" ] && [ "$OUTDIR" != "/var/tmp" ]; then
-    warn "Ignoring --outdir=$OUTDIR (output is stored in /var/tmp by policy)"
-  fi
+  say "$(T STARTING)"
+  deps_prepare
 
-  OUTBASE="$(pick_outdir)" || die "No writable output directory found."
-  check_free_space_warn || true
+  clean_tmp_runs
+  clean_old_archives
 
-  # cleanup user requested
-  clean_tmp_dir || true
-  clean_old_outputs || true
+  setup_workdir
+  start_metrics
+  start_spinner
 
-  host="$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || echo keenetic)"
-  host="$(sanitize_name "$host")"
-  ts="$(ts_utc_path)"
+  collect_system
+  collect_network
+  collect_entware
+  collect_ndm
+  collect_hooks
+  collect_web_probe
+  mirror_tree
+  pack_archive
 
-  BASE="keenetic-maxprobe-${host}-$$-${ts}"
-  WORK="$OUTBASE/${BASE}.work"
-  ARCHIVE="$OUTBASE/${BASE}.tar.gz"
+  stop_spinner
+  stop_metrics
 
-  ensure_dir "$WORK" || die "Cannot create workdir: $WORK"
-  # create subdirs early (prevents /meta/... bugs)
-  for d in meta analysis ndm entware net web sys fs tmp; do
-    ensure_dir "$WORK/$d" || true
-  done
+  deps_cleanup
 
-  RUNLOG="$WORK/meta/run.log"
-  ERRLOG="$WORK/meta/errors.log"
-  : >"$RUNLOG" 2>/dev/null || true
-  : >"$ERRLOG" 2>/dev/null || true
-
-  PHASE_FILE="$WORK/meta/phase.txt"
-  PROGRESS_FILE="$WORK/meta/progress.txt"
-  printf '0/0\n' >"$PROGRESS_FILE" 2>/dev/null || true
-  printf 'starting...\n' >"$PHASE_FILE" 2>/dev/null || true
-
-  START_EPOCH="$(date +%s 2>/dev/null || echo 0)"
-
-  trap 'stop_spinner 2>/dev/null || true; stop_metrics 2>/dev/null || true' INT TERM EXIT
-
-  # snapshot opkg before any installs
-  ensure_dir "$WORK/tmp" || true
-  opkg_snapshot "$WORK/tmp/opkg_before.txt"
-
-  # resolve auto profile / jobs early (before reporting)
-  cores="$(get_cores)"
-  mem_kb="$(mem_total_kb)"
-  apply_auto_profile "$cores" "$mem_kb" || true
-  resolve_jobs "$cores" "$mem_kb" || true
-
-  # total steps (approx)
-  TOTAL_STEPS=0
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # meta
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # proc
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # sys cmds
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # mirror
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # entware
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # network
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # http probe
-  if [ "$MODE" = "full" ] || [ "$MODE" = "extream" ]; then TOTAL_STEPS=$((TOTAL_STEPS + 1)); fi # web probe
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # firewall
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # ndmc
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # collectors
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # sensitive
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # redaction guides
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # reports
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # deps cleanup
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # pack
-  TOTAL_STEPS=$((TOTAL_STEPS + 1)) # cleanup
-
-  set_progress "$STEP_NO" "$TOTAL_STEPS"
-
-  start_metrics || true
-  start_spinner || true
-
-  say "$(tr STARTING)"
-  say "[+] Output base: $OUTBASE"
-  say "[+] Workdir: $WORK"
-  say "[+] Archive: $ARCHIVE"
-  say "[+] Mode=$MODE Profile=$PROFILE Collectors=$COLLECTORS Jobs=$JOBS_N Limits: CPU<=${MAX_CPU}% RAM<=${MAX_MEM}%"
-
-  step "Meta: basic info" collect_meta
-  step "System: /proc snapshots" collect_proc
-  step "System: commands" collect_sys_commands
-  step "Filesystem: mirror configs" mirror_filesystems
-  step "Entware: inventory" collect_entware
-  step "Network: snapshots" collect_network
-  step "Network: HTTP/RCI probe" collect_http_probe
-  if [ "$MODE" = "full" ] || [ "$MODE" = "extream" ]; then
-    step "Web: extended probe" collect_web_probe
-  fi
-  step "Firewall: snapshot" collect_firewall
-  step "KeeneticOS: ndmc snapshots" collect_ndmc
-  step "Collectors: optional languages" run_collectors_parallel
-  step "Analysis: sensitive map" scan_sensitive
-  step "Analysis: redaction guides" write_redaction_guides
-  step "Analysis: reports" generate_reports
-  step "Cleanup: temp packages" cleanup_temp_packages
-  step "Packing: archive" pack_archive
-
-  stop_spinner || true
-  stop_metrics || true
-
-  say "$(tr DONE) $ARCHIVE"
-  [ -f "$ARCHIVE.sha256" ] && say "[+] SHA256: $ARCHIVE.sha256" || true
-
-  # always cleanup workdir in normal flow (leaves only archive)
-  step "Cleanup: remove workdir" cleanup_workdir
-
-  return 0
+  printf '%s\n  %s\n' "$(T DONE)" "$ARCHIVE" >&2
+  cleanup_workdir
 }
 
+trap cleanup_workdir EXIT INT TERM
 main "$@"

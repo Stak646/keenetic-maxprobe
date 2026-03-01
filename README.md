@@ -18,6 +18,12 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/Stak646/keenetic-maxprobe/
 
 ## Web UI
 
+По умолчанию Web UI **автоматически выбирает свободный порт** (WEB_PORT=0). Узнать выбранный порт:
+
+- `cat /opt/var/run/keenetic-maxprobe-webui.port`
+- `cat /opt/var/run/keenetic-maxprobe-webui.url`
+
+
 После установки инсталлер:
 
 1) ставит `python3` (если возможно),
@@ -27,7 +33,7 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/Stak646/keenetic-maxprobe/
 
 Открывайте:
 
-- `http://<IP_роутера>:8088/?token=<TOKEN>`
+- `http://<IP_роутера>:<PORT>/?token=<TOKEN>`
 
 Токен хранится в конфиге (`WEB_TOKEN`) и обязателен для API.
 

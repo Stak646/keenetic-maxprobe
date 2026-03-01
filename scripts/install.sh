@@ -33,6 +33,9 @@ fetch() {
 # Pick router LAN IP (best-effort)
 guess_ip() {
   if have ip; then
+    # Keenetic LAN bridge is usually br0
+    ip -4 addr show br0 2>/dev/null | awk '/inet /{sub(/\/.*/,"",$2); if($2 !~ /^127\./){print $2; exit}}' && return 0
+    # fallback: first non-loopback
     ip -4 addr 2>/dev/null | awk '/inet / && $2 !~ /^127\./ {sub(/\/.*/,"",$2); print $2; exit}' || true
   fi
 }
@@ -113,7 +116,7 @@ OUTBASE_OVERRIDE=""
 
 # web ui
 WEB_BIND="0.0.0.0"
-WEB_PORT="8088"
+WEB_PORT="0"
 WEB_TOKEN=""
 EOF_CFG
 fi
@@ -133,19 +136,52 @@ if [ -x "$INITD_DIR/S99keenetic-maxprobe-webui" ]; then
   "$INITD_DIR/S99keenetic-maxprobe-webui" restart >/dev/null 2>&1 || true
 fi
 
-# Show URL and token
-TOKEN="$(awk -F= '/^WEB_TOKEN=/{gsub(/"/,"",$2); print $2}' "$CFG" 2>/dev/null || true)"
-if [ -z "$TOKEN" ]; then
-  # The web server generates token on first start; try to read again after start
-  sleep 1
-  TOKEN="$(awk -F= '/^WEB_TOKEN=/{gsub(/"/,"",$2); print $2}' "$CFG" 2>/dev/null || true)"
-fi
-
+# Show Web UI URL (best-effort)
 IP="$(guess_ip || true)"
 [ -n "$IP" ] || IP="<router-ip>"
 
 say ""
 say "[+] Installed."
 say "[+] Run CLI: keenetic-maxprobe"
-say "[+] Web UI: http://${IP}:8088/?token=${TOKEN:-<TOKEN>}"
+
+UF="/opt/var/run/keenetic-maxprobe-webui.url"
+PF="/opt/var/run/keenetic-maxprobe-webui.port"
+
+# wait a little for state files (auto-port)
+i=0
+while [ $i -lt 10 ]; do
+  [ -s "$UF" ] && break
+  sleep 1
+  i=$((i+1))
+done
+
+URL="$(cat "$UF" 2>/dev/null || true)"
+if [ -n "$URL" ]; then
+  URL="${URL%
+}"
+  say "[+] Web UI: $URL"
+else
+  PORT="$(cat "$PF" 2>/dev/null || true)"
+  [ -n "$PORT" ] || PORT="<PORT>"
+  say "[+] Web UI: http://${IP}:${PORT}/"
+fi
+
+say "[i] If you forgot the URL: cat /opt/var/run/keenetic-maxprobe-webui.url"
+say ""
+say "[+] Installed."
+say "[+] Run CLI: keenetic-maxprobe"
+PORT="$(awk -F= '/^WEB_PORT=/{gsub(/"/,"",$2); print $2}' "$CFG" 2>/dev/null || true)"
+if [ "${PORT:-0}" = "0" ] 2>/dev/null; then
+  PF="/opt/var/run/keenetic-maxprobe-webui.port"
+  i=0
+  while [ $i -lt 10 ]; do
+    [ -s "$PF" ] && break
+    sleep 1
+    i=$((i+1))
+  done
+  PORT="$(cat "$PF" 2>/dev/null || true)"
+fi
+[ -n "${PORT:-}" ] || PORT="<PORT>"
+say "[+] Web UI: http://${IP}:${PORT}/?token=${TOKEN:-<TOKEN>}"
+say "[i] If you forgot the URL: cat /opt/var/run/keenetic-maxprobe-webui.url"
 say ""

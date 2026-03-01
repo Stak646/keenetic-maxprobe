@@ -12,6 +12,8 @@ set -u
 
 CFG="/opt/etc/keenetic-maxprobe.conf"
 PIDFILE="/opt/var/run/keenetic-maxprobe-webui.pid"
+PORTFILE="/opt/var/run/keenetic-maxprobe-webui.port"
+URLFILE="/opt/var/run/keenetic-maxprobe-webui.url"
 LOG="/opt/var/log/keenetic-maxprobe-webui.log"
 
 mkdir -p /opt/var/run /opt/var/log 2>/dev/null || true
@@ -25,7 +27,7 @@ load_cfg() {
   fi
 
   WEB_BIND="${WEB_BIND:-0.0.0.0}"
-  WEB_PORT="${WEB_PORT:-8088}"
+  WEB_PORT="${WEB_PORT:-0}"
   LANG_UI="${LANG_UI:-ru}"
 }
 
@@ -46,7 +48,13 @@ start() {
     return 1
   fi
 
-  echo "Starting Web UI on ${WEB_BIND}:${WEB_PORT} ..."
+  rm -f "$PORTFILE" "$URLFILE" 2>/dev/null || true
+
+  if [ "${WEB_PORT:-0}" = "0" ] 2>/dev/null; then
+    echo "Starting Web UI on ${WEB_BIND}:auto (port=0) ..."
+  else
+    echo "Starting Web UI on ${WEB_BIND}:${WEB_PORT} ..."
+  fi
   # Use the main CLI in web mode so it can auto-generate token and save config.
   nohup /opt/bin/keenetic-maxprobe --web --web-bind "$WEB_BIND" --web-port "$WEB_PORT" --lang "$LANG_UI" \
     >>"$LOG" 2>&1 &
@@ -67,7 +75,7 @@ stop() {
     sleep 1
     kill -9 "$pid" 2>/dev/null || true
   fi
-  rm -f "$PIDFILE" 2>/dev/null || true
+  rm -f "$PIDFILE" "$PORTFILE" "$URLFILE" 2>/dev/null || true
 }
 
 status() {

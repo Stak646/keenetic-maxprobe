@@ -1,90 +1,73 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Keenetic MaxProbe — Web UI</title>
-  <link rel="stylesheet" href="/style.css" />
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>keenetic-maxprobe</title>
+<link rel="stylesheet" href="/static/style.css"/>
 </head>
 <body>
-  <header class="top">
-    <div class="brand">
-      <div class="logo">🛰️</div>
-      <div>
-        <div class="title">Keenetic MaxProbe</div>
-        <div class="subtitle">Web UI • запуск, статус, логи, архивы</div>
-      </div>
-    </div>
-    <div class="lang">
-      <label>Язык:</label>
-      <select id="langSelect">
-        <option value="ru" selected>RU</option>
-        <option value="en">EN</option>
-      </select>
-    </div>
+<div class="wrap">
+  <header>
+    <div class="title">keenetic-maxprobe</div>
+    <div id="dot" class="dot idle"></div>
+    <div id="line" class="status">loading...</div>
   </header>
 
-  <main class="grid">
-    <section class="card">
-      <h2>Управление запуском</h2>
-      <div class="btnrow">
-        <button class="btn" data-preset="lite">Lite</button>
-        <button class="btn" data-preset="diagnostic">Diagnostic</button>
-        <button class="btn primary" data-preset="forensic">Forensic</button>
-        <button class="btn danger" data-preset="extream">Extream</button>
-      </div>
-      <div class="btnrow">
-        <button class="btn" data-preset="full">Mode: full</button>
-        <button class="btn" data-preset="safe">Mode: safe</button>
-        <button class="btn warn" id="stopBtn">Stop</button>
-      </div>
-      <p class="hint">
-        Если указан порт «занят», Web UI автоматически попробует следующий порт.
-        Если вы видите <code>0.0.0.0</code> — открывайте по IP роутера (например <code>http://192.168.1.1:8088/</code>).
-      </p>
-      <div id="startResult" class="mono small"></div>
-    </section>
-
-    <section class="card">
-      <h2>Статус</h2>
-      <div class="status">
-        <div class="k">UTC</div><div class="v mono" id="utc">—</div>
-        <div class="k">Workdir</div><div class="v mono" id="workdir">—</div>
-        <div class="k">Phase</div><div class="v mono" id="phase">—</div>
-        <div class="k">Progress</div><div class="v mono" id="progress">—</div>
-        <div class="k">CPU / RAM / Load1</div><div class="v mono" id="metrics">—</div>
-      </div>
-
-      <div class="progressbar" aria-label="progress">
-        <div class="progressfill" id="progressFill" style="width:0%"></div>
-      </div>
-
-      <div class="spinnerline">
-        <div class="spinner" id="spin"></div>
-        <div class="small mono" id="runState">—</div>
-      </div>
-    </section>
-
-    <section class="card wide">
-      <h2>Логи (tail)</h2>
-      <pre id="logBox" class="log"></pre>
-    </section>
-
-    <section class="card wide">
-      <h2>Архивы и рабочие папки</h2>
-      <div class="small hint">
-        Сканируются: <code>/var/tmp</code> (и <code>/tmp</code> как запасной вариант).
-      </div>
-      <div id="archives"></div>
-    </section>
-  </main>
-
-  <footer class="foot">
-    <div class="small">
-      keenetic-maxprobe Web UI • статические файлы внутри пакета • без внешних зависимостей
+  <section class="panel">
+    <h2>Запуск</h2>
+    <div class="row"><label>Профиль</label>
+      <select id="profile">
+        <option value="lite">lite</option>
+        <option value="diagnostic">diagnostic</option>
+        <option value="forensic" selected>forensic</option>
+      </select>
     </div>
-  </footer>
+    <div class="row"><label>Режим</label>
+      <select id="mode">
+        <option value="full" selected>full</option>
+        <option value="safe">safe</option>
+        <option value="extream">extream</option>
+      </select>
+    </div>
+    <div class="row"><label>Collectors</label>
+      <select id="collectors">
+        <option value="all" selected>all</option>
+        <option value="shonly">shonly</option>
+        <option value="shpy">shpy</option>
+      </select>
+    </div>
+    <div class="row"><label>Deps (extream)</label>
+      <select id="deps_level">
+        <option value="core" selected>core</option>
+        <option value="collectors">collectors</option>
+      </select>
+    </div>
+    <button id="start">Старт</button>
+    <div id="resp" class="muted"></div>
+  </section>
 
-  <script src="/app.js"></script>
+  <section class="panel">
+    <h2>Состояние</h2>
+    <div class="kv"><span>Phase</span><span id="phase">-</span></div>
+    <div class="kv"><span>Progress</span><span id="progress">-</span></div>
+    <div class="kv"><span>CPU</span><span id="cpu">-</span></div>
+    <div class="kv"><span>RAM</span><span id="mem">-</span></div>
+    <div class="kv"><span>Load1</span><span id="load1">-</span></div>
+  </section>
+
+  <section class="panel">
+    <h2>Лог (tail)</h2>
+    <pre id="log" class="log"></pre>
+  </section>
+
+  <section class="panel">
+    <h2>Архивы</h2>
+    <div id="archives"></div>
+  </section>
+
+  <footer class="muted">Хранение: /var/tmp. В extream могут быть чувствительные данные.</footer>
+</div>
+<script src="/static/app.js"></script>
 </body>
 </html>

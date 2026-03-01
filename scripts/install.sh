@@ -1,77 +1,62 @@
 #!/bin/sh
+# keenetic-maxprobe installer (Entware/Keenetic)
 set -eu
 
-PREFIX="/opt"
-BIN="$PREFIX/bin"
-SHARE="$PREFIX/share/keenetic-maxprobe"
-TMPBASE="/tmp"
+REPO="https://github.com/Stak646/keenetic-maxprobe"
+TARBALL="${REPO}/archive/refs/heads/main.tar.gz"
 
-REPO_OWNER="Stak646"
-REPO_NAME="keenetic-maxprobe"
-BRANCH="main"
-TARBALL_URL="https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/heads/$BRANCH.tar.gz"
+say() { printf '%s\n' "$*" >&2; }
+need() { command -v "$1" >/dev/null 2>&1; }
+ensure_dir() { [ -d "$1" ] || mkdir -p "$1"; }
 
-log() { printf '%s\n' "$*" >&2; }
-have() { command -v "$1" >/dev/null 2>&1; }
+BIN="/opt/bin"
+SHARE="/opt/share/keenetic-maxprobe"
+TMP="/tmp/keenetic-maxprobe-install.$$"
 
-ensure_downloader() {
-  if have curl || have wget; then
-    return 0
-  fi
-  if have opkg; then
-    log "[i] No curl/wget. Trying to install a downloader via opkg (best-effort)..."
-    opkg update || true
-    opkg install curl ca-bundle || true
-    if have curl; then return 0; fi
-    opkg install wget-ssl ca-bundle || true
-    if have wget; then return 0; fi
-    opkg install wget-nossl || true
-    if have wget; then return 0; fi
-  fi
-  log "[!] No curl/wget available and cannot install them. Install Entware/OPKG first."
+cleanup() { rm -rf "$TMP" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+ensure_dir "$BIN"
+ensure_dir "$SHARE"
+
+say "[+] Installing keenetic-maxprobe from $TARBALL"
+
+if need opkg; then
+  opkg update >/dev/null 2>&1 || true
+  need curl || opkg install curl >/dev/null 2>&1 || true
+  need wget || opkg install wget-ssl >/dev/null 2>&1 || opkg install wget-nossl >/dev/null 2>&1 || true
+  need tar  || opkg install tar >/dev/null 2>&1 || true
+  need gzip || opkg install gzip >/dev/null 2>&1 || true
+fi
+
+ensure_dir "$TMP"
+cd "$TMP"
+
+if need curl; then
+  curl -fsSL "$TARBALL" -o main.tar.gz
+elif need wget; then
+  wget -qO main.tar.gz "$TARBALL"
+else
+  say "[-] Need curl or wget"
   exit 1
-}
+fi
 
-download() {
-  url="$1"
-  dst="$2"
-  if have curl; then
-    curl -fsSL "$url" -o "$dst"
-    return 0
-  fi
-  wget -qO "$dst" "$url"
-}
+tar -xzf main.tar.gz
+SRC_DIR="$(find . -maxdepth 1 -type d -name 'keenetic-maxprobe-*' | head -n 1)"
+[ -n "$SRC_DIR" ] || { say "[-] Cannot find extracted source dir"; exit 1; }
 
-log "[+] Installing keenetic-maxprobe from $TARBALL_URL"
-ensure_downloader
+cp -f "$SRC_DIR/bin/keenetic-maxprobe" "$BIN/keenetic-maxprobe"
+chmod +x "$BIN/keenetic-maxprobe"
 
-mkdir -p "$BIN" "$SHARE" 2>/dev/null || true
-mkdir -p "$TMPBASE" 2>/dev/null || true
+if [ -f "$SRC_DIR/scripts/entwarectl" ]; then
+  cp -f "$SRC_DIR/scripts/entwarectl" "$BIN/entwarectl"
+  chmod +x "$BIN/entwarectl"
+  say "[+] Helper:   $BIN/entwarectl"
+fi
 
-TMPDIR="$TMPBASE/keenetic-maxprobe-install.$$"
-trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT INT TERM
-mkdir -p "$TMPDIR"
-
-TAR="$TMPDIR/src.tar.gz"
-download "$TARBALL_URL" "$TAR"
-
-tar -xzf "$TAR" -C "$TMPDIR"
-SRC="$TMPDIR/$REPO_NAME-$BRANCH"
-
-# main executable
-cp -f "$SRC/bin/keenetic-maxprobe" "$BIN/keenetic-maxprobe"
-chmod 0755 "$BIN/keenetic-maxprobe"
-
-# helper: unified Entware service control
-cp -f "$SRC/scripts/entwarectl" "$BIN/entwarectl"
-chmod 0755 "$BIN/entwarectl"
-
-# collectors bundle
 rm -rf "$SHARE/collectors" 2>/dev/null || true
-mkdir -p "$SHARE"
-cp -R "$SRC/collectors" "$SHARE/collectors" 2>/dev/null || true
+cp -a "$SRC_DIR/collectors" "$SHARE/collectors"
 
-log "[+] Installed: $BIN/keenetic-maxprobe"
-log "[+] Helper:   $BIN/entwarectl"
-log "[+] Collectors: $SHARE/collectors"
-log "[+] Run: keenetic-maxprobe (or keenetic-maxprobe --init)"
+say "[+] Installed: $BIN/keenetic-maxprobe"
+say "[+] Collectors: $SHARE/collectors"
+say "[+] Run: keenetic-maxprobe (or keenetic-maxprobe --init)"

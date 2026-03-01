@@ -21,12 +21,12 @@ Use:
 ## Web UI
 
 ```sh
-keenetic-maxprobe --web --web-bind 0.0.0.0 --web-port 0  # 0 = auto port
+keenetic-maxprobe --web --web-bind 0.0.0.0 --web-port 8088
 ```
 
 Open:
 
-`http://<ip>:<port>/?token=<TOKEN>` (port: `cat /opt/var/run/keenetic-maxprobe-webui.port`)
+`http://<ip>:8088/?token=<TOKEN>`
 
 Token is stored in `/opt/etc/keenetic-maxprobe.conf` (`WEB_TOKEN`).
 

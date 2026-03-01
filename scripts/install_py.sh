@@ -20,7 +20,7 @@ if [ -x /opt/etc/init.d/S99keenetic-maxprobe-webui ]; then
   /opt/etc/init.d/S99keenetic-maxprobe-webui restart >/dev/null 2>&1 || true
 else
   say "[i] init script not found; start manually:"
-  say "    keenetic-maxprobe --web --web-bind 0.0.0.0 --web-port 0"
+  say "    keenetic-maxprobe --web --web-bind 0.0.0.0 --web-port 8088"
 fi
 
 say "[+] Done."

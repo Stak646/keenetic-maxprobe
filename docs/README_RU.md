@@ -42,12 +42,12 @@
 Запуск вручную:
 
 ```sh
-keenetic-maxprobe --web --web-bind 0.0.0.0 --web-port 0  # 0 = авто-порт
+keenetic-maxprobe --web --web-bind 0.0.0.0 --web-port 8088
 ```
 
 Открыть:
 
-`http://<ip>:<port>/?token=<TOKEN>` (порт см. `cat /opt/var/run/keenetic-maxprobe-webui.port`)
+`http://<ip>:8088/?token=<TOKEN>`
 
 Токен хранится в `/opt/etc/keenetic-maxprobe.conf` (`WEB_TOKEN`).
 

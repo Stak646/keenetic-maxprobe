@@ -21,6 +21,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -54,8 +55,8 @@ DEFAULTS: Dict[str, Any] = {
     "MAX_CPU": "85",
     "MAX_MEM": "95",
     "JOBS": "auto",
-    "WEB_BIND": "127.0.0.1",
-    "WEB_PORT": "8088",
+    "WEB_BIND": "0.0.0.0",
+    "WEB_PORT": "0",
     "WEB_TOKEN": "",
 }
 
@@ -456,7 +457,7 @@ class App:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "keenetic-maxprobe-webui/0.8.0"
+    server_version = "keenetic-maxprobe-webui/0.8.1"
 
     def do_GET(self) -> None:
         app: App = self.server.app  # type: ignore[attr-defined]
@@ -591,7 +592,8 @@ class Handler(BaseHTTPRequestHandler):
             if "WEB_PORT" in updates:
                 try:
                     p = int(updates["WEB_PORT"])
-                    if not (1 <= p <= 65535):
+                    # 0 means: auto-select a free port
+                    if not (0 <= p <= 65535):
                         raise ValueError()
                 except Exception:
                     updates["WEB_PORT"] = DEFAULTS["WEB_PORT"]
@@ -695,15 +697,80 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), format % args))
 
 
+def _guess_lan_ip(bind: str) -> str:
+    """Best-effort LAN IP detection for printing a usable URL.
+
+    Note: on routers with multiple interfaces this may pick a non-LAN address.
+    We try br0 first via `ip`, then fall back to a UDP socket trick.
+    """
+    if bind == "127.0.0.1":
+        return "127.0.0.1"
+
+    # Try `ip` for br0 (Keenetic LAN bridge)
+    try:
+        import subprocess
+
+        out = subprocess.check_output(["ip", "-4", "addr", "show", "br0"], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("inet "):
+                ip = line.split()[1].split("/")[0]
+                if ip and not ip.startswith("127."):
+                    return ip
+    except Exception:
+        pass
+
+    # Fallback: UDP connect trick (doesn't require real connectivity)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("1.1.1.1", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+
+    return "<router-ip>"
+
+
+def _pick_state_dir(cli_value: str) -> Path:
+    cand: List[Path] = []
+    if cli_value:
+        cand.append(Path(cli_value))
+    cand += [Path("/opt/var/run"), Path("/var/run"), Path("/tmp")]
+
+    for p in cand:
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            if p.is_dir():
+                return p
+        except Exception:
+            continue
+    return Path(".")
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        # best-effort only
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bind", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8088)
+    ap.add_argument("--bind", default="0.0.0.0", help="Bind address (default: 0.0.0.0 for LAN access)")
+    ap.add_argument("--port", type=int, default=0, help="Port (0 = auto-select free port)")
     ap.add_argument("--lang", default="ru")
     ap.add_argument("--probe-bin", required=True)
     ap.add_argument("--outbase", default="")
     ap.add_argument("--config", default="/opt/etc/keenetic-maxprobe.conf")
     ap.add_argument("--token", required=True)
+    ap.add_argument("--state-dir", default="", help="Where to write .port/.url state files (default: /opt/var/run)")
     args = ap.parse_args()
 
     static_root = Path(__file__).resolve().parent / "static"
@@ -720,10 +787,39 @@ def main() -> int:
         static_root=static_root,
     )
 
-    httpd = ThreadingHTTPServer((args.bind, args.port), Handler)
+    try:
+        httpd = ThreadingHTTPServer((args.bind, args.port), Handler)
+    except OSError as e:
+        # If a fixed port is busy, fall back to auto port selection
+        if args.port != 0 and getattr(e, "errno", None) in {98, 48}:  # EADDRINUSE (linux/mac)
+            httpd = ThreadingHTTPServer((args.bind, 0), Handler)
+        else:
+            raise
     httpd.app = app  # type: ignore[attr-defined]
 
-    print(f"[+] keenetic-maxprobe Web UI listening on http://{args.bind}:{args.port}/", file=sys.stderr)
+    # If port=0 we get the actual chosen port after bind
+    actual_port = int(httpd.server_address[1])
+    app.port = actual_port
+
+    state_dir = _pick_state_dir(args.state_dir)
+    port_file = state_dir / "keenetic-maxprobe-webui.port"
+    url_file = state_dir / "keenetic-maxprobe-webui.url"
+    bind_file = state_dir / "keenetic-maxprobe-webui.bind"
+
+    lan_ip = _guess_lan_ip(args.bind)
+    url = f"http://{lan_ip}:{actual_port}/?token={args.token}"
+
+    _write_text_atomic(port_file, str(actual_port) + "\n")
+    _write_text_atomic(url_file, url + "\n")
+    _write_text_atomic(bind_file, args.bind + "\n")
+
+    # Print human-friendly URL
+    if args.bind == "0.0.0.0":
+        print(f"[+] keenetic-maxprobe Web UI listening on http://0.0.0.0:{actual_port}/ (LAN)", file=sys.stderr)
+    else:
+        print(f"[+] keenetic-maxprobe Web UI listening on http://{args.bind}:{actual_port}/", file=sys.stderr)
+    print(f"[+] Suggested URL: {url}", file=sys.stderr)
+    print(f"[i] State files: {port_file} , {url_file}", file=sys.stderr)
     print("[!] API token is required for /api/* endpoints", file=sys.stderr)
 
     try:

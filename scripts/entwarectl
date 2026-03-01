@@ -1,6 +1,6 @@
 #!/bin/sh
-# entwarectl — unified control for /opt/etc/init.d services (Entware/OPKG)
-# Version: 0.6.0
+# entwarectl — unified control for OPKG/Entware init.d services
+# Version: 0.6.1
 
 set -eu
 
@@ -9,17 +9,17 @@ BASE="/opt/etc/init.d"
 usage() {
   cat >&2 <<'USAGE'
 usage:
-  entwarectl list
-  entwarectl status <service>
-  entwarectl start <service>
-  entwarectl stop <service>
-  entwarectl restart <service>
-  entwarectl enable <service>    # chmod +x
-  entwarectl disable <service>   # chmod -x
+  entwarectl [--prefix /opt] list
+  entwarectl [--prefix /opt] status  <service>
+  entwarectl [--prefix /opt] start   <service>
+  entwarectl [--prefix /opt] stop    <service>
+  entwarectl [--prefix /opt] restart <service>
+  entwarectl [--prefix /opt] enable  <service>   # chmod +x
+  entwarectl [--prefix /opt] disable <service>   # chmod -x
 
 notes:
-  - service is the init script filename from /opt/etc/init.d
-  - this is a thin wrapper intended for automation (e.g. Telegram bot)
+- on Keenetic, OPKG mounts selected storage to /opt; this wrapper supports other prefixes for portability
+- <service> is the init script filename from <prefix>/etc/init.d
 USAGE
 }
 
@@ -34,6 +34,15 @@ need_svc() {
   [ -f "$script" ] || { echo "no such init script: $script" >&2; exit 1; }
 }
 
+# args
+prefix=""
+if [ "${1:-}" = "--prefix" ]; then
+  prefix="${2:-}"; shift 2
+fi
+if [ -n "$prefix" ]; then
+  BASE="$prefix/etc/init.d"
+fi
+
 cmd="${1:-}"
 svc="${2:-}"
 
@@ -42,29 +51,24 @@ case "$cmd" in
     need_base
     ls -1 "$BASE" 2>/dev/null || true
     ;;
-
   enable)
     need_svc "$svc"
     chmod +x "$script" 2>/dev/null || true
     echo "enabled: $svc"
     ;;
-
   disable)
     need_svc "$svc"
     chmod -x "$script" 2>/dev/null || true
     echo "disabled: $svc"
     ;;
-
   start|stop|restart|status)
     need_svc "$svc"
     [ -x "$script" ] || { echo "script not executable (disabled?): $script" >&2; exit 1; }
     "$script" "$cmd"
     ;;
-
   ""|help|-h|--help)
     usage
     ;;
-
   *)
     echo "unknown command: $cmd" >&2
     usage

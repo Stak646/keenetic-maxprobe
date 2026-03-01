@@ -1433,14 +1433,7 @@ webui_start() {
     warn "Web UI server not found: $srv"
     return 1
   fi
-
-  # Ensure token
-  if [ -z "${WEB_TOKEN:-}" ]; then
-    # 16 bytes base16-ish without requiring openssl
-    WEB_TOKEN="$( (dd if=/dev/urandom bs=1 count=16 2>/dev/null || echo "$(now_epoch)$$") | od -An -tx1 2>/dev/null | tr -d ' \n' | head -c 32 )"
-    [ -n "$WEB_TOKEN" ] || WEB_TOKEN="$(now_epoch)$$"
-    save_config
-  fi
+  # WEB_TOKEN is optional. If empty, API is open (LAN only).
 
   if [ "${WEB_PORT:-0}" = "0" ] 2>/dev/null; then
     say "[*] Web UI port=0 -> auto-select a free port"
@@ -1453,7 +1446,11 @@ webui_start() {
   # clean stale hints (best-effort)
   rm -f "$STATE_DIR/keenetic-maxprobe-webui.port" "$STATE_DIR/keenetic-maxprobe-webui.url" 2>/dev/null || true
 
-  say "[+] Web UI starting on ${WEB_BIND}:${WEB_PORT} (token: ${WEB_TOKEN})"
+  if [ -n "${WEB_TOKEN:-}" ]; then
+    say "[+] Web UI starting on ${WEB_BIND}:${WEB_PORT} (token enabled)"
+  else
+    say "[+] Web UI starting on ${WEB_BIND}:${WEB_PORT}"
+  fi
   say "[i] After start, actual URL is written to: $STATE_DIR/keenetic-maxprobe-webui.url"
 
   python3 "$srv" \

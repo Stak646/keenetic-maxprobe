@@ -136,17 +136,37 @@ if [ -x "$INITD_DIR/S99keenetic-maxprobe-webui" ]; then
   "$INITD_DIR/S99keenetic-maxprobe-webui" restart >/dev/null 2>&1 || true
 fi
 
-# Show URL and token
-TOKEN="$(awk -F= '/^WEB_TOKEN=/{gsub(/"/,"",$2); print $2}' "$CFG" 2>/dev/null || true)"
-if [ -z "$TOKEN" ]; then
-  # The web server generates token on first start; try to read again after start
-  sleep 1
-  TOKEN="$(awk -F= '/^WEB_TOKEN=/{gsub(/"/,"",$2); print $2}' "$CFG" 2>/dev/null || true)"
-fi
-
+# Show Web UI URL (best-effort)
 IP="$(guess_ip || true)"
 [ -n "$IP" ] || IP="<router-ip>"
 
+say ""
+say "[+] Installed."
+say "[+] Run CLI: keenetic-maxprobe"
+
+UF="/opt/var/run/keenetic-maxprobe-webui.url"
+PF="/opt/var/run/keenetic-maxprobe-webui.port"
+
+# wait a little for state files (auto-port)
+i=0
+while [ $i -lt 10 ]; do
+  [ -s "$UF" ] && break
+  sleep 1
+  i=$((i+1))
+done
+
+URL="$(cat "$UF" 2>/dev/null || true)"
+if [ -n "$URL" ]; then
+  URL="${URL%
+}"
+  say "[+] Web UI: $URL"
+else
+  PORT="$(cat "$PF" 2>/dev/null || true)"
+  [ -n "$PORT" ] || PORT="<PORT>"
+  say "[+] Web UI: http://${IP}:${PORT}/"
+fi
+
+say "[i] If you forgot the URL: cat /opt/var/run/keenetic-maxprobe-webui.url"
 say ""
 say "[+] Installed."
 say "[+] Run CLI: keenetic-maxprobe"

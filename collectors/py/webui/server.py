@@ -6,7 +6,7 @@ Features:
 - Start/stop probe runs with parameters
 - Status/progress/log tail
 - List & download archives (.tar.gz + .sha256)
-- Token-based auth for API endpoints
+- Optional token-based auth for API endpoints
 
 Security note:
 - Static UI is public, but API requires token.
@@ -184,6 +184,8 @@ class App:
         if not token:
             qs = parse_qs(urlparse(handler.path).query)
             token = (qs.get("token") or [""])[0]
+        if not self.token:
+            return True
         return bool(token) and token == self.token
 
     # ---------- files / scanning ----------
@@ -769,7 +771,7 @@ def main() -> int:
     ap.add_argument("--probe-bin", required=True)
     ap.add_argument("--outbase", default="")
     ap.add_argument("--config", default="/opt/etc/keenetic-maxprobe.conf")
-    ap.add_argument("--token", required=True)
+    ap.add_argument("--token", default="", help="Optional API token; if empty, API is open")
     ap.add_argument("--state-dir", default="", help="Where to write .port/.url state files (default: /opt/var/run)")
     args = ap.parse_args()
 
@@ -807,7 +809,7 @@ def main() -> int:
     bind_file = state_dir / "keenetic-maxprobe-webui.bind"
 
     lan_ip = _guess_lan_ip(args.bind)
-    url = f"http://{lan_ip}:{actual_port}/?token={args.token}"
+    url = f"http://{lan_ip}:{actual_port}/" + (f"?token={args.token}" if args.token else "")
 
     _write_text_atomic(port_file, str(actual_port) + "\n")
     _write_text_atomic(url_file, url + "\n")
@@ -820,7 +822,7 @@ def main() -> int:
         print(f"[+] keenetic-maxprobe Web UI listening on http://{args.bind}:{actual_port}/", file=sys.stderr)
     print(f"[+] Suggested URL: {url}", file=sys.stderr)
     print(f"[i] State files: {port_file} , {url_file}", file=sys.stderr)
-    print("[!] API token is required for /api/* endpoints", file=sys.stderr)
+    print("[i] API token: enabled" if args.token else "[i] API token: disabled", file=sys.stderr)
 
     try:
         httpd.serve_forever()
